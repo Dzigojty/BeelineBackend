@@ -2,350 +2,301 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"strconv"
+	"sync"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/julienschmidt/httprouter"
 	"github.com/rs/zerolog"
 
-	"myproject/internal"
-	"myproject/internal/models"
-	"myproject/internal/services"
+	"myproject/internal/jwt"
+	"myproject/internal/model"
+	"myproject/internal/services/ads"
+	"myproject/internal/services/chat"
+	"myproject/internal/services/finance"
+	"myproject/internal/services/login"
+	"myproject/internal/services/mediator"
+	"myproject/internal/services/order"
+	"myproject/internal/services/review"
+	"myproject/internal/services/user"
 )
 
 type MyApp struct {
-	app internal.App
+	app model.App
 }
 
-func NewRepository(pool *pgxpool.Pool) *internal.Repository {
-	return &internal.Repository{Pool: pool}
+// Настройка апгрейдера для преобразования HTTP-соединений в WebSocket
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true // В реальных проектах проверьте домен клиента
+	},
+}
+
+var connections = make(map[int]*websocket.Conn)
+var mu sync.Mutex // Для синхронизации доступа к карте
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request, redisClient *redis.Client, userID int) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Error upgrading to websocket:", err)
+		return
+	}
+
+	mu.Lock()
+	connections[userID] = conn
+	mu.Unlock()
+	log.Printf("User %d connected", userID)
+
+	fmt.Println(strconv.Itoa(userID))
+
+	//проверка кеша и отправка, если там что-то есть
+	// Проверяем, есть ли данные в Redis
+	// Чтение данных из Redis как строки
+	messages, err := redisClient.LRange(context.Background(), strconv.Itoa(userID), 0, -1).Result()
+	if err != nil {
+		fmt.Println("Ошибка Redis:", err)
+		return
+	}
+
+	// Десериализуем уведомления и отправляем их клиенту
+	for _, message := range messages {
+		var notif model.NotifType
+		err := json.Unmarshal([]byte(message), &notif)
+		if err != nil {
+			fmt.Println("Ошибка десериализации:", err)
+			continue
+		}
+		// Отправляем данные клиенту (например, через WebSocket)
+		conn.WriteMessage(websocket.TextMessage, []byte(message))
+	}
+
+	// Удаляем отправленные данные из очереди
+	redisClient.Del(context.Background(), strconv.Itoa(userID))
+}
+
+func NewRepository(pool *pgxpool.Pool) *model.Repository {
+	return &model.Repository{Pool: pool}
 }
 
 func NewApp(Ctx context.Context, dbpool *pgxpool.Pool) *MyApp {
-	return &MyApp{internal.App{Ctx: Ctx, Repo: NewRepository(dbpool), Cache: make(map[string]models.User)}}
+	return &MyApp{model.App{Ctx: Ctx, Repo: NewRepository(dbpool), Cache: make(map[string]model.User)}}
 }
 
 func StartPage(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
 	fmt.Fprintf(rw, "")
 }
 
+func handleTextMessage() httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		defer r.Body.Close()
+
+		fmt.Printf("Received message: %s\n", string(body))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Message received"))
+	}
+}
+
 func (application *MyApp) Routes(r *httprouter.Router, Ctx context.Context, dbpool *pgxpool.Pool, rdb *redis.Client, logger zerolog.Logger) {
-	a := services.NewApp(Ctx, dbpool)
+	//WebSocket-соединения
+	r.GET("/handleWebSocket", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
+		// Извлечение токена JWT из query параметра
+		token := r.URL.Query().Get("token")
 
-	r.ServeFiles("/public/*filepath", http.Dir("public"))
+		flag, user_id, _ := jwt.IsAuthorized(token)
+		if flag {
+			handleWebSocket(rw, r, rdb, user_id)
+			// сonnections = make(map[int]*websocket.Conn) // ключ — userID, значение — соединение
 
-	r.POST("/signupUserByEmail", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SignupUserByEmailPOST(rw, r, rdb, logger)
-	}) //пользователь укзывает почту(регистрация)
+			return
+		}
 
-	r.POST("/signupUserByPhone", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SignupUserByPhonePOST(rw, r, rdb, logger)
-	}) //пользователь укзывает телефон(регистрация)
+		response := model.Response{
+			Status:  "success",
+			Message: "Показано",
+		}
 
-	r.POST("/enterCodeFromEmail", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EnterCodeFromEmailPOST(rw, r, rdb, logger)
-	}) //пользователь укзывает код почта
+		json.NewEncoder(rw).Encode(response)
 
-	r.POST("/enterCodeFromPhone", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EnterCodeFromPhonePOST(rw, r, rdb, logger)
-	}) //пользователь укзывает код телефон
-
-	r.POST("/signupLegalEmail", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SignupLegalEmailPOST(rw, r, rdb, logger)
-	}) //передача данных Юридического лица (регистрация) Email
-
-	r.POST("/signupLegalPhone", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SignupLegalPhonePOST(rw, r, rdb, logger)
-	}) //передача данных Юридического лица (регистрация) Email
-
-	r.POST("/signupNaturEmail", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SignupNaturEmailPOST(rw, r, rdb, logger)
-	}) //передача данных Физического лица (регистрация) Email
-
-	r.POST("/signupNaturPhone", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SignupNaturPhonePOST(rw, r, rdb, logger)
-	}) //передача данных Физического лица (регистрация) Email
-
-	r.POST("/editingLegalUserData", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EditingLegalUserDataPOST(rw, r, logger)
-	}) //изменение данных для юрика
-
-	r.POST("/editingNaturUserData", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EditingNaturUserDataPOST(rw, r, logger)
-	}) //изменение данных для физика
-
-	r.POST("/sendCodForEmail", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendCodForEmailPOST(rw, r, rdb, logger)
-	}) //отправка сообщения на почту для подтверждения
-
-	r.POST("/enterCodFromEmail", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EnterCodFromEmailPOST(rw, r, rdb, logger)
-	}) //отправка сообщения на почту для подтверждения
-
-	r.POST("/sendCodForPhoneNum", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendCodForPhoneNumPOST(rw, r, rdb, logger)
-	}) //отправка сообщения на телефон для подтверждения
-
-	r.POST("/enterCodFromPhoneNum", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EnterCodFromPhoneNumPOST(rw, r, rdb, logger)
-	}) //отправка сообщения на телефон для подтверждения
-
-	r.POST("/login", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.LoginPOST(rw, r, logger)
-	}) //логин отправка
-
-	r.POST("/productList", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.ProductListPOST(rw, r, logger)
+		return
 	})
 
-	r.POST("/printAds", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.PrintAdsPOST(rw, r, logger)
-	}) //вывод продукта
+	r.GET("/disconnWebSocket", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
+		// Извлечение токена JWT из query параметра
+		token, err := jwt.ReadCookie("token", r)
+		if err != nil {
+			fmt.Println(err)
+		}
 
-	r.POST("/sortProductListDailyRate", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SortProductListDailyRatePOST(rw, r, logger)
-	}) //вывод продукта с учётом сортировки всем категориям
+		flag, user_id, _ := jwt.IsAuthorized(token)
+		if flag {
+			delete(connections, user_id)
+			if connections[user_id] == nil {
 
-	r.POST("/sortProductListHourlyRate", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SortProductListHourlyRatePOST(rw, r, logger)
-	}) //вывод продукта с учётом сортировки всем категориям
+				response := model.Response{
+					Status:  "success",
+					Message: "Показано",
+				}
 
-	r.POST("/sigAds", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SignupAdsPOST(rw, r, logger)
-	}) //размещение(добавление) объявления
+				json.NewEncoder(rw).Encode(response)
 
-	r.POST("/editAdsList", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EditAdsListPOST(rw, r, logger)
-	}) //редактирование(изменение) объявления
+				return
+			}
+		}
 
-	r.POST("/updAds", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.UpdAdsPOST(rw, r, logger)
-	}) //редактирование(изменение) объявления
+		response := model.Response{
+			Status:  "fatal",
+			Message: "не удалось разоарвать соединение",
+		}
 
-	r.POST("/delAds", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.DelAdsPOST(rw, r, logger)
-	}) //удаление объявления
+		json.NewEncoder(rw).Encode(response)
 
-	r.POST("/sigFavAds", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SigFavAdsPOST(rw, r, logger)
-	}) //добавление объявления в избранное
+		return
+	})
+	r.ServeFiles("/public/*filepath", http.Dir("public"))
 
-	r.POST("/delFavAds", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.DelFavAdsPOST(rw, r, logger)
-	}) //удаление объявления из избранного
+	user_handler := &user.SignupHandler{
+		RedisClient: rdb,
+		Logger:      logger,
+	}
 
-	r.POST("/searchForTech", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SearchForTechPOST(rw, r, logger)
-	}) //поиск объявления
+	r.POST("/message", handleTextMessage()) // это нужно удалить в проде
 
-	r.POST("/sortProductListCategoriez", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SortProductListCategoriezPOST(rw, r, logger)
-	}) //вывод продукта с учётом сортировки категории
+	// схема user
+	// signupUser_test
+	r.POST("/signupUserByEmail", user.SignupUserByEmailCreater(rdb, logger, Ctx)) //пользователь укзывает почту(регистрация)
+	r.POST("/signupUserByPhone", user.SignupUserByPhoneCreater(rdb, logger, Ctx)) //пользователь укзывает телефон(регистрация)
+	// enterCode_test
+	r.POST("/enterCodeFromEmail", user.EnterCodeFromEmail(rdb, logger, Ctx)) //пользователь укзывает код почта
+	r.POST("/enterCodeFromPhone", user.EnterCodeFromPhone(rdb, logger, Ctx)) //пользователь укзывает код телефон
+	// signupLegal_test
+	r.POST("/signupLegalEmail", user.SignupLegalEmail(rdb, logger, Ctx, dbpool)) //передача данных Юридического лица (регистрация) Email
+	r.POST("/signupLegalPhone", user.SignupLegalPhone(rdb, logger, Ctx, dbpool)) //передача данных Юридического лица (регистрация) Email
+	// signupNatur_test
+	r.POST("/signupNaturEmail", user.SignupNaturEmail(rdb, logger, Ctx, dbpool)) //передача данных Физического лица (регистрация) Email
+	r.POST("/signupNaturPhone", user.SignupNaturPhone(rdb, logger, Ctx, dbpool)) //передача данных Физического лица (регистрация) Email
+	// editingUser_test
+	r.POST("/editingLegalUserData", user.EditingLegalUserData(rdb, logger, Ctx, dbpool)) //изменение данных для юрика
+	r.POST("/editingNaturUserData", user.EditingNaturUserData(rdb, logger, Ctx, dbpool)) //изменение данных для физика
+	// sendCod_test
+	r.POST("/sendCodForEmail", user.SendCodForEmail(rdb, logger, Ctx))               //отправка сообщения на почту для подтверждения
+	r.POST("/sendCodForPhoneNum", user_handler.SendCodForPhoneNum(rdb, logger, Ctx)) //отправка сообщения на телефон для подтверждения
+	// enterCod_test
+	r.POST("/enterCodFromEmail", user.EnterCodFromEmail(rdb, logger, Ctx, dbpool))       //отправка сообщения на почту для подтверждения
+	r.POST("/enterCodFromPhoneNum", user.EnterCodFromPhoneNum(rdb, logger, Ctx, dbpool)) //отправка сообщения на телефон для подтверждения
+	// favProfilGroup_test
+	r.GET("/favProfilsFirstNew", user.FavProfilsFirstNew(rdb, logger, Ctx, dbpool))     //групировка профиля
+	r.GET("/favProfilsFirstOld", user.FavProfilsFirstOld(rdb, logger, Ctx, dbpool))     //групировка профиля
+	r.GET("/favProfilsFirstCheap", user.FavProfilsFirstCheap(rdb, logger, Ctx, dbpool)) //групировка профиля
+	r.GET("/favProfilsFirstDearl", user.FavProfilsFirstDearl(rdb, logger, Ctx, dbpool)) //групировка профиля
 
-	r.POST("/chatButtonInAds", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.ChatButtonInAdsPOST(rw, r, logger)
-	}) //кнопка "написать" в листе объявления
+	// схема login
+	r.POST("/loginYandex", login.LoginYandex(rdb, logger, Ctx, dbpool))                                                   // Это используется при нажатии кнопки "Авторизироватьяс через Яндекс"
+	r.POST("/callback", login.Callback(rdb, logger, Ctx, dbpool))                                                         // Обработка обратного вызова авторизации через Яндекс, если она прошла успешно
+	r.POST("/login", login.Login(rdb, logger, Ctx, dbpool))                                                               //логин отправка
+	r.POST("/RecoveryPasswdEmail", login.RecoveryPasswdEmail(rdb, logger, Ctx, dbpool))                                   //восстановление пароля
+	r.POST("/recoveryPasswdPhone", login.RecoveryPasswdPhone(rdb, logger, Ctx, dbpool))                                   //восстановление пароля
+	r.POST("/enterCodeForRecoveryPassWithEmail", login.EnterCodeForRecoveryPassWithEmail(rdb, logger, Ctx, dbpool))       //восстановление пароля через почту(отправление на почту)
+	r.POST("/sendCodeForRecoveryPassWithEmail", login.SendCodeForRecoveryPassWithEmail(rdb, logger, Ctx, dbpool))         //восстановление пароля через почту
+	r.POST("/enterCodeForRecoveryPassWithPhoneNum", login.EnterCodeForRecoveryPassWithPhoneNum(rdb, logger, Ctx, dbpool)) //восстановление пароля через телефон
+	r.POST("/sendCodeForRecoveryPassWithPhoneNum", login.SendCodeForRecoveryPassWithPhoneNum(rdb, logger, Ctx, dbpool))   //восстановление пароля через телефон
+	r.POST("/recoveryPass", login.RecoveryPass(rdb, logger, Ctx, dbpool))                                                 //авторизованное восстановление пароля через телефон
+	r.POST("/autorizLoginEmailSend", login.AutorizLoginEmailSend(rdb, logger, Ctx, dbpool))                               //логин отправка
+	r.POST("/autorizLoginEmailEnter", login.AutorizLoginEmailEnter(rdb, logger, Ctx, dbpool))                             //логин ввод
+	r.GET("/refreshToken", login.RefreshToken(rdb, logger, Ctx, dbpool))                                                  //рефреш токены
+	r.POST("/sendCode", login.SendCode(rdb, logger, Ctx, dbpool))                                                         //вводим код
+	r.POST("/enterPasswd", login.EnterPasswd(rdb, logger, Ctx, dbpool))                                                   //вводим код
+	r.POST("/addAddress", login.AddAddress(rdb, logger, Ctx, dbpool))                                                     // добавляем адрес
+	r.GET("/giveAddress", login.GiveAddress(rdb, logger, Ctx, dbpool))                                                    // смотрим
 
-	r.POST("/sigChat", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SigChatPOST(rw, r, logger)
-	}) //начало переписки
+	// схема ads
+	r.POST("/productList", ads.ProductList(rdb, logger, Ctx, dbpool))                             //
+	r.POST("/printAds", ads.PrintAds(rdb, logger, Ctx, dbpool))                                   //вывод продукта
+	r.POST("/sortProductListDailyRate", ads.SortProductListDailyRate(rdb, logger, Ctx, dbpool))   //вывод продукта с учётом сортировки всем категориям
+	r.POST("/sortProductListHourlyRate", ads.SortProductListHourlyRate(rdb, logger, Ctx, dbpool)) //вывод продукта с учётом сортировки всем категориям
+	r.POST("/sigAds", ads.SignupAds(rdb, logger, Ctx, dbpool))                                    //размещение(добавление) объявления
+	r.POST("/editAdsList", ads.EditAdsList(rdb, logger, Ctx, dbpool))                             //редактирование(изменение) объявления
+	r.POST("/updAds", ads.UpdAds(rdb, logger, Ctx, dbpool))                                       //редактирование(изменение) объявления
+	r.POST("/delAds", ads.DelAds(rdb, logger, Ctx, dbpool))                                       //удаление объявления
+	r.POST("/sigFavAds", ads.SigFavAds(rdb, logger, Ctx, dbpool, connections))                    //добавление объявления в избранное
+	r.POST("/delFavAds", ads.DelFavAds(rdb, logger, Ctx, dbpool))                                 //удаление объявления из избранного
+	r.POST("/searchForTech", ads.SearchForTech(rdb, logger, Ctx, dbpool))                         //поиск объявления
+	r.POST("/sortProductListCategoriez", ads.SortProductListCategoriez(rdb, logger, Ctx, dbpool)) //вывод продукта с учётом сортировки категории
+	r.GET("/groupAdsByHourlyRate", ads.GroupAdsByHourlyRate(rdb, logger, Ctx, dbpool))            //группировка объявлений, сначала дороже(почасовая цена)
+	r.GET("/groupFavByRecent", ads.GroupFavByRecent(rdb, logger, Ctx, dbpool))                    //группировка избранных объявлений, сначала новые
+	r.GET("/groupFavByCheaper", ads.GroupFavByCheaper(rdb, logger, Ctx, dbpool))                  //группировка избранных объявлений, сначала дороже
+	r.GET("/groupFavByDearly", ads.GroupFavByDearly(rdb, logger, Ctx, dbpool))                    //группировка избранных объявлений, сначала дешевле
+	r.GET("/groupAdsByRented", ads.GroupAdsByRented(rdb, logger, Ctx, dbpool))                    //вывод объявлений по хозяину(активных)
+	r.GET("/groupAdsByArchived", ads.GroupAdsByArchived(rdb, logger, Ctx, dbpool))                //вывод объявлений по хозяину(неактивный)
+	r.POST("/allUserAds", ads.AllUserAds(rdb, logger, Ctx, dbpool))                               //Кнопка 11 объявлений пользователя
+	r.POST("/allAdsOfThisUser", ads.AllAdsOfThisUser(rdb, logger, Ctx, dbpool))                   //все объявления этого юзера
 
-	r.POST("/openChat", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.OpenChatPOST(rw, r, logger)
-	}) //открытие чата
+	// схема chat
+	r.POST("/chatButtonInAds", chat.ChatButtonInAds(rdb, logger, Ctx, dbpool))                      //кнопка "написать" в листе объявления
+	r.POST("/sigChat", chat.SigChat(rdb, logger, Ctx, dbpool))                                      //начало переписки
+	r.POST("/openChat", chat.OpenChat(rdb, logger, Ctx, dbpool))                                    //открытие чата
+	r.POST("/sendMessageAndImage", chat.SendMessageAndImage(rdb, logger, Ctx, dbpool, connections)) //отправить сообщение и медиа
+	r.POST("/sendImage", chat.SendImage(rdb, logger, Ctx, dbpool, connections))                     //отправить медиа
+	r.POST("/sendMessage", chat.SendMessage(rdb, logger, Ctx, dbpool, connections))                 //отправить сообщение
+	r.POST("/sendMessageAndVideo", chat.SendMessageAndVideo(rdb, logger, Ctx, dbpool, connections)) //отправить сообщение и медиа
+	r.POST("/sendVideo", chat.SendVideo(rdb, logger, Ctx, dbpool, connections))                     //отправить сообщение
+	r.POST("/sigDisputInChat", chat.SigDisputInChat(rdb, logger, Ctx, dbpool))                      //начать спор
+	r.GET("/printChat", chat.PrintChat(rdb, logger, Ctx, dbpool))                                   //вывод всех чатов
 
-	r.POST("/sendMessageAndImage", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendMessageAndImagePOST(rw, r, logger)
-	}) //отправить сообщение и медиа
+	// схема review
+	r.POST("/sigReview", review.SigReview(rdb, logger, Ctx, dbpool, connections))                      //оставить отзыв
+	r.POST("/updReview", review.UpdReview(rdb, logger, Ctx, dbpool))                                   //обновить отзыв
+	r.POST("/groupReviewNewOnesFirst", review.GroupReviewNewOnesFirst(rdb, logger, Ctx, dbpool))       //вывод отзывов по порядку, сначала новые
+	r.POST("/groupReviewOldOnesFirst", review.GroupReviewOldOnesFirst(rdb, logger, Ctx, dbpool))       //вывод отзывов не по порядку, сначала старые
+	r.POST("/groupReviewLowRatOnesFirst", review.GroupReviewLowRatOnesFirst(rdb, logger, Ctx, dbpool)) //вывод отзывов, сначала с высокой оценкой
+	r.POST("/groupReviewHigRatOnesFirst", review.GroupReviewHigRatOnesFirst(rdb, logger, Ctx, dbpool)) //вывод отзывов, сначала с низкой оценкой
 
-	r.POST("/sendImage", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendImagePOST(rw, r, logger)
-	}) //отправить медиа
+	// схема mediator
+	r.GET("/disputeChatPanel", mediator.DisputeChatPanel(rdb, logger, Ctx, dbpool))              //показать лист спорных чатов
+	r.POST("/mediatorEnterInChat", mediator.MediatorEnterInChat(rdb, logger, Ctx, dbpool))       //принять спор на себя(работа медиатора)
+	r.POST("/rebookList", mediator.RebookList(rdb, logger, Ctx, dbpool))                         // по какому бронированию у нас спор (rebookList)
+	r.POST("/regReport", mediator.RegReport(rdb, logger, Ctx, dbpool))                           //регистрация репорта
+	r.POST("/mediatorFinishJobUser", mediator.MediatorFinishJobUser(rdb, logger, Ctx, dbpool))   //медиатор выносит решение
+	r.POST("/mediatorFinishJobOwner", mediator.MediatorFinishJobOwner(rdb, logger, Ctx, dbpool)) //медиатор выносит решение
+	// r.POST("/printReport", mediator.PrintReportPOST(rw, r, logger)) //вывод репорта
 
-	r.POST("/sendMessage", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendMessagePOST(rw, r, logger)
-	}) //отправить сообщение
+	// схема finance
+	r.POST("/transactionToAnother", finance.TransactionToAnother(rdb, logger, Ctx, dbpool))           //получаем от юзера деньги(или отправляем ему их)
+	r.POST("/transactionToSomething", finance.TransactionToSomething(rdb, logger, Ctx, dbpool))       //получаем возврат денег от системы(возврат по ошибке или что-то похожее)
+	r.POST("/transactionToReturnAmount", finance.TransactionToReturnAmount(rdb, logger, Ctx, dbpool)) //платим деньги за что-то системе(не конкретному юзеру)
+	r.POST("/walletHistory", finance.WalletHistory(rdb, logger, Ctx, dbpool))                         //история кошелька
+	r.GET("/walletList", finance.WalletList(rdb, logger, Ctx, dbpool))                                //лист кошелька
 
-	r.POST("/sendMessageAndVideo", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendMessageAndVideoPOST(rw, r, logger)
-	}) //отправить сообщение и медиа
-
-	r.POST("/sendVideo", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendVideoPOST(rw, r, logger)
-	}) //отправить сообщение
-
-	r.POST("/sigDisputInChat", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SigDisputInChatPOST(rw, r, logger)
-	}) //начать спор
-	//чат заканчивается тут
-
-	r.POST("/sigReview", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SigReviewPOST(rw, r, logger)
-	}) //оставить отзыв
-
-	r.POST("/updReview", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.UpdReviewPOST(rw, r, logger)
-	}) //обновить сообщение
-
-	r.GET("/disputeChatPanel", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.DisputeChatPanelGET(rw, r, logger)
-	}) //показать лист спорных чатов
-
-	r.POST("/mediatorEnterInChat", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.MediatorEnterInChatPOST(rw, r, logger)
-	}) //принять спор на себя(работа медиатора)
-
-	r.POST("/mediatorFinishJob", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.MediatorFinishJobInChatPOST(rw, r, logger)
-	}) //медиатор выносит решение
-
-	r.GET("/groupAdsByHourlyRate", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupAdsByHourlyRateGET(rw, r, logger)
-	}) //группировка объявлений, сначала дороже(почасовая цена)
-
-	r.GET("/groupFavByRecent", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupFavByRecentGET(rw, r, logger)
-	}) //группировка избранных объявлений, сначала новые
-
-	r.GET("/groupFavByCheaper", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupFavByCheaperGET(rw, r, logger)
-	}) //группировка избранных объявлений, сначала дороже
-
-	r.GET("/groupFavByDearly", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupFavByDearlyGET(rw, r, logger)
-	}) //группировка избранных объявлений, сначала дешевле
-
-	r.POST("/groupReviewNewOnesFirst", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupReviewNewOnesFirstPOST(rw, r, logger)
-	}) //вывод отзывов по порядку, сначала новые
-
-	r.POST("/groupReviewOldOnesFirst", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupReviewOldOnesFirstPOST(rw, r, logger)
-	}) //вывод отзывов не по порядку, сначала старые
-
-	r.POST("/groupReviewLowRatOnesFirst", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupReviewLowRatOnesFirstPOST(rw, r, logger)
-	}) //вывод отзывов, сначала с высокой оценкой
-
-	r.POST("/groupReviewHigRatOnesFirst", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupReviewHigRatOnesFirstPOST(rw, r, logger)
-	}) //вывод отзывов, сначала с низкой оценкой
-
-	r.GET("/groupAdsByRented", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupAdsByRentedGET(rw, r, logger)
-	}) //вывод объявлений по хозяину(активных)
-
-	r.GET("/groupAdsByArchived", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupAdsByArchivedGET(rw, r, logger)
-	}) //вывод объявлений по хозяину(неактивный)
-
-	r.POST("/transactionToAnother", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.TransactionToAnotherPOST(rw, r, logger)
-	}) //получаем от юзера деньги(или отправляем ему их)
-
-	r.POST("/transactionToSomething", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.TransactionToSomethingPOST(rw, r, logger)
-	}) //получаем возврат денег от системы(возврат по ошибке или что-то похожее)
-
-	r.POST("/transactionToReturnAmount", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.TransactionToReturnAmountPOST(rw, r, logger)
-	}) //платим деньги за что-то системе(не конкретному юзеру)
-
-	r.POST("/regOrderHourly", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.RegOrderHourlyPOST(rw, r, logger)
-	}) //броинрование и оформление заказа
-
-	r.POST("/regOrderDaily", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.RegOrderDailyPOST(rw, r, logger)
-	}) //броинрование и оформление заказа
-
-	r.POST("/bidding", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.BiddingPOST(rw, r, logger)
-	}) //пользователи торгуются
-
-	r.POST("/regOrderWithBidding", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.RegOrderWithBiddingPOST(rw, r, logger)
-	}) //броинрование на основе торгов
-
-	r.POST("/rebookOrderHourly", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.RebookOrderHourlyPOST(rw, r, logger)
-	}) //переброинрование TYT
-
-	r.POST("/rebookOrderDaily", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.RebookOrderDailyPOST(rw, r, logger)
-	}) //переброинрование TYT
-
-	r.POST("/complBooking", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.ComplBookingPOST(rw, r, logger)
-	}) //бронирование прошло успешно и мы начисляем бабки юзеру
-
-	r.GET("/bookingList", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.BookingListGET(rw, r, logger)
-	}) //переброинрование
-
-	r.GET("/groupOrdersByRented", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupOrdersByRentedGET(rw, r, logger)
-	}) //группировка заказов по активным
-
-	r.GET("/groupOrdersByUnRented", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.GroupOrdersByUnRentedGET(rw, r, logger)
-	}) //группировка заказов по неактивным
-
-	r.POST("/regReport", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.RegReportPOST(rw, r, logger)
-	}) //регистрация репорта
-
-	// r.POST("/printReport", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-	// a.PrintReportPOST(rw, r, logger)
-	// }) //выво
-
-	r.POST("/sendCodeForRecoveryPassWithEmail", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendCodeForRecoveryPassWithEmailPOST(rw, r, rdb, logger)
-	}) //восстановление пароля через почту
-
-	r.POST("/enterCodeForRecoveryPassWithEmail", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EnterCodeForRecoveryPassWithEmailPOST(rw, r, rdb, logger)
-	}) //восстановление пароля через почту(отправление на почту)
-
-	r.POST("/sendCodeForRecoveryPassWithPhoneNum", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.SendCodeForRecoveryPassWithPhoneNumPOST(rw, r, rdb, logger)
-	}) //восстановление пароля через телефон
-
-	r.POST("/enterCodeForRecoveryPassWithPhoneNum", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.EnterCodeForRecoveryPassWithPhoneNumPOST(rw, r, rdb, logger)
-	}) //восстановление пароля через телефон
-
-	r.POST("/autorizLoginEmailSend", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.AutorizLoginEmailSendPOST(rw, r, rdb, logger)
-	}) //логин отправка
-
-	r.POST("/autorizLoginEmailEnter", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.AutorizLoginEmailEnterPOST(rw, r, rdb, logger)
-	}) //логин ввод
-
-	r.GET("/refreshToken", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.RefreshTokenGET(rw, r, logger)
-	}) //рефреш токены
-
-	r.GET("/printChat", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.PrintChatGET(rw, r, logger)
-	}) //вывод всех чатов
-
-	r.POST("/allUserAds", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.AllUserAdsPOST(rw, r, logger)
-	}) //Кнопка 11 объявлений пользователя
-
-	r.POST("/allAdsOfThisUser", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.AllAdsOfThisUserPOST(rw, r, logger)
-	}) //все объявления этого юзера
-
-	r.POST("/walletHistory", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.WalletHistoryPOST(rw, r, logger)
-	}) //история кошелька
-
-	r.GET("/walletList", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
-		a.WalletListGET(rw, r, logger)
-	}) //лист кошелька
+	// схема order
+	r.POST("/regOrderHourly", order.RegOrderHourly(rdb, logger, Ctx, dbpool, connections))   //броинрование и оформление заказа
+	r.POST("/regOrderDaily", order.RegOrderDaily(rdb, logger, Ctx, dbpool, connections))     //броинрование и оформление заказа
+	r.POST("/regOrderBidding", order.RegOrderBidding(rdb, logger, Ctx, dbpool, connections)) //броинрование на основе торгов
+	r.POST("/rebookOrder", order.RebookOrder(rdb, logger, Ctx, dbpool))                      //переброинрование TYT
+	r.GET("/groupOrdersByRented", order.GroupOrdersByRented(rdb, logger, Ctx, dbpool))       //группировка заказов по активным
+	r.GET("/groupOrdersByUnRented", order.GroupOrdersByUnRented(rdb, logger, Ctx, dbpool))   //группировка заказов по неактивным
+	r.POST("/complBooking", order.ComplBooking(rdb, logger, Ctx, dbpool))                    //бронирование прошло успешно и мы начисляем бабки юзеру
+	r.GET("/bookingList", order.BookingList(rdb, logger, Ctx, dbpool))                       // лист бронирования
+	r.GET("/sigPDFfile", order.SigPDFfile(rdb, logger, Ctx, dbpool))                         // лист бронирования
 }

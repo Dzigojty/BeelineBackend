@@ -5,10 +5,152 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/go-redis/redis/v8"
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v4/pgxpool"
 )
+
+type Message struct {
+	User_id int `json:"User_id"`
+}
+
+func Order_Notification(ctx context.Context, buddy_id int, conn *websocket.Conn, header string, ads_id int, start_at time.Time, end_at time.Time, text string, reg_at time.Time, user_id, user_role int, avatar, name string, rdb *redis.Client) {
+	type NotifType struct {
+		Header    string
+		Ads_id    int
+		Text      string
+		Start_at  time.Time
+		End_at    time.Time
+		Reg_at    time.Time
+		User_id   int
+		User_role int
+		Avatar    string
+		Name      string
+	}
+
+	// Создаем объект структуры
+	notification := NotifType{
+		Header:    header,
+		Ads_id:    ads_id,
+		Text:      text,
+		Start_at:  start_at,
+		End_at:    end_at,
+		Reg_at:    reg_at,
+		User_id:   user_id,
+		User_role: user_role,
+		Avatar:    avatar,
+		Name:      name,
+	}
+
+	// Сериализуем структуру в JSON
+	message, err := json.Marshal(notification)
+	if err != nil {
+		fmt.Println("Ошибка при сериализации уведомления:", err)
+		return
+	}
+
+	if conn == nil {
+		// Сохраняем код подтверждения в Redis с TTL на 60 дней
+		err := rdb.LPush(ctx, strconv.Itoa(buddy_id), []byte(message), (2 * 30 * 24 * time.Hour)).Err()
+		errorr(err)
+
+		return
+	}
+
+	err = conn.WriteMessage(websocket.TextMessage, []byte(message))
+	errorr(err)
+}
+
+func Reviews_Notification(ctx context.Context, buddy_id int, conn *websocket.Conn, header string, order_id int, text string, reg_at time.Time, user_id, user_role int, avatar, name string, rdb *redis.Client) {
+	type NotifType struct {
+		Header    string
+		Order_id  int
+		Text      string
+		Reg_at    time.Time
+		User_id   int
+		User_role int
+		Avatar    string
+		Name      string
+	}
+
+	// Создаем объект структуры
+	notification := NotifType{
+		Header:    header,
+		Order_id:  order_id,
+		Text:      text,
+		Reg_at:    reg_at,
+		User_id:   user_id,
+		User_role: user_role,
+		Avatar:    avatar,
+		Name:      name,
+	}
+
+	// Сериализуем структуру в JSON
+	message, err := json.Marshal(notification)
+	if err != nil {
+		fmt.Println("Ошибка при сериализации уведомления:", err)
+		return
+	}
+
+	if conn == nil {
+		// Сохраняем код подтверждения в Redis с TTL на 60 дней
+		err := rdb.LPush(ctx, strconv.Itoa(buddy_id), []byte(message), (2 * 30 * 24 * time.Hour)).Err()
+		errorr(err)
+
+		return
+	}
+
+	err = conn.WriteMessage(websocket.TextMessage, []byte(message))
+	errorr(err)
+}
+
+func Notification(ctx context.Context, buddy_id int, conn *websocket.Conn, header string, chat_id, mess_id int, text string, sent_at time.Time, user_id, user_role int, avatar, name string, rdb *redis.Client) {
+	type NotifType struct {
+		Header    string
+		Chat_id   int
+		Mess_id   int
+		Text      string
+		Sent_at   time.Time
+		User_id   int
+		User_role int
+		Avatar    string
+		Name      string
+	}
+
+	// Создаем объект структуры
+	notification := NotifType{
+		Header:    header,
+		Chat_id:   chat_id,
+		Mess_id:   mess_id,
+		Text:      text,
+		Sent_at:   sent_at,
+		User_id:   user_id,
+		User_role: user_role,
+		Avatar:    avatar,
+		Name:      name,
+	}
+
+	// Сериализуем структуру в JSON
+	message, err := json.Marshal(notification)
+	if err != nil {
+		fmt.Println("Ошибка при сериализации уведомления:", err)
+		return
+	}
+
+	if conn == nil {
+		// Сохраняем код подтверждения в Redis с TTL на 60 дней
+		err := rdb.LPush(ctx, strconv.Itoa(buddy_id), []byte(message), (2 * 30 * 24 * time.Hour)).Err()
+		errorr(err)
+
+		return
+	}
+
+	err = conn.WriteMessage(websocket.TextMessage, []byte(message))
+	errorr(err)
+}
 
 func (repo *MyRepository) ChatButtonInAdsSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, id_user int, id_ads int) (err error) {
 	request, err := rep.Query(
@@ -69,10 +211,7 @@ func (repo *MyRepository) SigChatSQL(ctx context.Context, rw http.ResponseWriter
 
 		id_ads,
 	)
-	if err != nil {
-		err = fmt.Errorf("failed to exec data: %w", err)
-		return
-	}
+	errorr(err)
 
 	var id_buddy int
 	for request.Next() {
@@ -94,10 +233,7 @@ func (repo *MyRepository) SigChatSQL(ctx context.Context, rw http.ResponseWriter
 		id_buddy,
 		id_ads,
 	)
-	if err != nil {
-		err = fmt.Errorf("failed to exec data: %w", err)
-		return
-	}
+	errorr(err)
 
 	var chat_id int
 	for request.Next() {
@@ -143,74 +279,24 @@ func (repo *MyRepository) SigChatSQL(ctx context.Context, rw http.ResponseWriter
 
 func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, id_chat, user_id int) (err error) {
 	type Product_user struct {
-		User_id   int
-		Name      string
-		Text      string
-		Media     []string
-		Date      time.Time
-		Media_pwd []string
+		Message_id int
+		User_id    int
+		User_role  int
+		Name       string
+		Text       string
+		Media      []string
+		Date       time.Time
+		Media_pwd  []string
 	}
 	Products_user_mass := []Product_user{}
 
-	// request_1, err := rep.Query( //это запрос на вывод наших сообщений
-	// 	ctx,
-	// 	`
-	// 	WITH i AS (
-	// 		SELECT id, text, sent_at, sender_id
-	// 		FROM chat.messages
-	// 		WHERE chat_id = $1 AND sender_id != $2
-	// 	),
-	// 	j AS (
-	// 		SELECT message_id, path_to_file
-	// 		FROM chat.attachments
-	// 		WHERE message_id IN (SELECT id FROM i)
-	// 	),
-	// 	company_user AS (
-	// 		SELECT user_id, name_of_company
-	// 		FROM users.company_user
-	// 		WHERE user_id = (SELECT sender_id FROM i LIMIT 1)
-	// 	),
-	// 	individual_user AS (
-	// 		SELECT user_id, name
-	// 		FROM users.individual_user
-	// 		WHERE user_id = (SELECT sender_id FROM i LIMIT 1)
-	// 	)
-	// 	SELECT i.sender_id AS user_id,
-	// 		COALESCE(individual_user.name::TEXT, company_user.name_of_company::TEXT) AS name,
-	// 		i.text, i.sent_at, j.path_to_file
-	// 	FROM i
-	// 	LEFT JOIN j ON j.message_id = i.id
-	// 	LEFT JOIN company_user ON company_user.user_id = i.sender_id
-	// 	LEFT JOIN individual_user ON individual_user.user_id = i.sender_id;
-	// 	`,
-
-	// 	id_chat,
-	// 	user_id,
-	// )
-	// errorr(err)
-
+	var Message_idd int
 	var User_iddd int
+	var User_rolee int
 	var Namee string
 	var Text string
 	var Date time.Time
 	var Media_pwd []string
-
-	// for request_1.Next() {
-	// 	err := request_1.Scan(
-	// 		&User_iddd,
-	// 		&Namee,
-	// 		&Text,
-	// 		&Date,
-	// 		&Media_pwd,
-	// 	)
-	// 	if err != nil {
-	// 		fmt.Println(err)
-
-	// 		continue
-	// 	}
-
-	// 	Products_user_mass = append(Products_user_mass, Product_user{User_id: User_iddd, Name: Namee, Text: Text, Date: Date, Media_pwd: Media_pwd})
-	// }
 
 	request_2, err := rep.Query( //это запрос на вывод сообщений нашего кента
 		ctx,
@@ -234,27 +320,73 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 			SELECT user_id, name 
 			FROM users.individual_user 
 			WHERE user_id = (SELECT sender_id FROM i LIMIT 1)
+		),
+		chat_info AS (
+			SELECT user_1_id, user_2_id, ad_id, have_disput, mediator_id FROM  chat.chats WHERE chats.id = $1
+		),
+		ownerr AS (
+			SELECT owner_id FROM ads.ads WHERE id = (SELECT ad_id FROM chat_info)
+		),
+		global_rate_info AS (
+			WITH i AS (
+				SELECT ad_id FROM chat.chats WHERE chats.id = $1
+			)
+			SELECT global_rate FROM finance.bidding WHERE bidding.ads_id = (SELECT ad_id FROM i) AND renter_id = $2 AND end_at > NOW()
+			ORDER BY id desc
+			LIMIT 1
 		)
-		SELECT i.sender_id AS user_id, 
+		SELECT
+			(SELECT ad_id FROM chat_info) AS ads_id,
+			(SELECT have_disput FROM chat_info) AS disput_state,
+			COALESCE((SELECT mediator_id FROM chat_info), 0) AS mediator_id,
+			COALESCE((SELECT user_1_id FROM chat_info WHERE user_1_id != (SELECT owner_id FROM ownerr)),
+				(SELECT user_2_id FROM chat_info WHERE user_2_id != (SELECT owner_id FROM ownerr))) AS slsve_id,
+			(SELECT owner_id FROM ownerr),
+			COALESCE((SELECT global_rate FROM global_rate_info), 0),
+
+			i.id AS message_id,
+			i.sender_id AS user_id,
 			COALESCE(individual_user.name, 'company_user.name_of_company') AS name,
-			i.text, i.sent_at, j.path_to_file
+			i.text,
+			i.sent_at,
+			j.path_to_file,
+			users.user_role
 		FROM i
+		JOIN users.users ON users.id = i.sender_id
 		LEFT JOIN j ON j.message_id = i.id
 		LEFT JOIN company_user ON company_user.user_id = i.sender_id
-		LEFT JOIN individual_user ON individual_user.user_id = i.sender_id;
+		LEFT JOIN individual_user ON individual_user.user_id = i.sender_id
+		ORDER BY i.id desc;
 		`,
 
 		id_chat,
+		user_id,
 	)
 	errorr(err)
 
+	var ads_id int
+	var disput_state bool
+	var mediator_id int
+	var slave_id int
+	var owner_id int
+	var global_rate int
+
 	for request_2.Next() {
 		err := request_2.Scan(
+			&ads_id,
+			&disput_state,
+			&mediator_id,
+			&slave_id,
+			&owner_id,
+			&global_rate,
+
+			&Message_idd,
 			&User_iddd,
 			&Namee,
 			&Text,
 			&Date,
 			&Media_pwd,
+			&User_rolee,
 		)
 		if err != nil {
 			fmt.Println(err)
@@ -262,13 +394,19 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 			continue
 		}
 
-		Products_user_mass = append(Products_user_mass, Product_user{User_id: User_iddd, Name: Namee, Text: Text, Date: Date, Media_pwd: Media_pwd})
+		Products_user_mass = append(Products_user_mass, Product_user{Message_id: Message_idd, User_id: User_iddd, User_role: User_rolee, Name: Namee, Text: Text, Date: Date, Media_pwd: Media_pwd})
 	}
 
 	type Response struct {
-		Status  string         `json:"status"`
-		Data    []Product_user `json:"data,omitempty"`
-		Message string         `json:"message"`
+		Status       string         `json:"status"`
+		Ads_id       int            `json:"ads_id"`
+		Disput_state bool           `json:"disput_state"`
+		Mediator_id  int            `json:"moderator_id"`
+		Slave_id     int            `json:"slave_id"`
+		Owner_id     int            `json:"owner_id"`
+		Global_rate  int            `json:"global_rate"`
+		Data         []Product_user `json:"data,omitempty"`
+		Message      string         `json:"message"`
 	}
 
 	if err == nil && (Products_user_mass != nil) {
@@ -282,9 +420,15 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 		}
 
 		response := Response{
-			Status:  "success",
-			Data:    Products_user_mass,
-			Message: "Показано",
+			Status:       "success",
+			Ads_id:       ads_id,
+			Disput_state: disput_state,
+			Mediator_id:  mediator_id,
+			Slave_id:     slave_id,
+			Owner_id:     owner_id,
+			Global_rate:  global_rate,
+			Data:         Products_user_mass,
+			Message:      "Показано",
 		}
 
 		rw.WriteHeader(http.StatusOK)
@@ -374,7 +518,7 @@ func Notofication(rep *pgxpool.Pool, ctx context.Context, rw http.ResponseWriter
 	json.NewEncoder(rw).Encode(response)
 }
 
-func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, id_chat, id_user int, text string, file_paths []string) (err error) {
+func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, id_chat, id_user int, text string, file_paths []string, conn map[int]*websocket.Conn, rdb *redis.Client) (err error) {
 	request, err := rep.Query(
 		ctx,
 		`
@@ -384,10 +528,11 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 	`,
 
 		id_chat,
-		id_user,
+		id_user, // тот, кто отправляет сообщение
 		text,
 	)
 	errorr(err)
+	fmt.Println(err)
 
 	var mess_id int
 
@@ -401,6 +546,7 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 			continue
 		}
 	}
+	fmt.Println(err)
 
 	type Response struct {
 		Status  string `json:"status"`
@@ -415,6 +561,7 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 
 			mess_id)
 		errorr(err)
+		fmt.Println(err)
 
 		var sent_at time.Time
 
@@ -427,6 +574,7 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 				continue
 			}
 		}
+		fmt.Println(err)
 	} else {
 
 		response := Response{
@@ -450,6 +598,7 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 			file_paths[i],
 		)
 		errorr(err)
+		fmt.Println(err)
 
 		var attachments_id int
 
@@ -463,6 +612,7 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 				continue
 			}
 		}
+		fmt.Println(err)
 
 		type A struct {
 			Mess_id  int `json:"Mess_id"`
@@ -481,7 +631,7 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 			response := Response{
 				Status:  "success",
 				Data:    image,
-				Message: fmt.Sprintf("Фото № %d доставленно. ", attachments_id, "Текст № %d доставленн.", mess_id),
+				Message: fmt.Sprintf("Фото № %d доставленно. Текст № %d доставленн", attachments_id, mess_id),
 			}
 
 			request, err := rep.Query(
@@ -490,6 +640,7 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 
 				mess_id)
 			errorr(err)
+			fmt.Println(err)
 
 			var sent_at time.Time
 
@@ -502,11 +653,78 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 					continue
 				}
 			}
+			fmt.Println(err)
+
+			//достаём аву и имя
+			request, err = rep.Query(
+				ctx,
+				`
+						WITH i AS (
+							SELECT user_1_id, user_2_id 
+							FROM Chat.chats 
+							WHERE id = $1
+						)
+						SELECT COALESCE(
+							(SELECT user_1_id FROM i WHERE user_1_id != $2),
+							(SELECT user_2_id FROM i WHERE user_2_id != $2)
+						);
+					`,
+				id_chat,
+				id_user,
+			)
+			errorr(err)
+
+			var buddy_id int
+
+			for request.Next() {
+				err := request.Scan(
+					&buddy_id,
+				)
+				if err != nil {
+					fmt.Println(err)
+
+					continue
+				}
+			}
+
+			//достаём аву, имя и роль
+			request, err = rep.Query(
+				ctx,
+				`
+				SELECT 
+					users.avatar_path,
+					COALESCE(individual_user.name, company_user.name_of_company),
+					users.user_role
+				FROM users.users
+				LEFT JOIN users.individual_user ON individual_user.user_id = users.id
+				LEFT JOIN users.company_user ON company_user.user_id = users.id
+				WHERE users.id = $1
+				`,
+				id_user,
+			)
+			errorr(err)
+
+			var user_role int
+			var avatar_path string
+			var name string
+
+			for request.Next() {
+				err := request.Scan(
+					&avatar_path,
+					&name,
+					&user_role,
+				)
+				if err != nil {
+					fmt.Println(err)
+
+					continue
+				}
+			}
 
 			json.NewEncoder(rw).Encode(response)
 
-			// Notofication(rep, ctx, rw, id_chat, id_user, text, sent_at) //уведомление пользователя
-
+			// buddy_id это кому отправляем сообщение
+			Notification(ctx, buddy_id, conn[buddy_id], "message", id_chat, mess_id, text, sent_at, id_user, user_role, ServeSpecificMediaBase64(rw, r, avatar_path), name, rdb)
 		} else {
 
 			response := Response{
@@ -519,10 +737,10 @@ func (repo *MyRepository) SendMessageAndMediaSQL(ctx context.Context, rw http.Re
 
 		}
 	}
-	return err
+	return
 }
 
-func (repo *MyRepository) SendImageSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, id_chat, id_user int, file_path []string) (err error) {
+func (repo *MyRepository) SendImageSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, id_chat, id_user int, file_path []string, conn map[int]*websocket.Conn, rdb *redis.Client) (err error) {
 	request, err := rep.Query(
 		ctx,
 		`
@@ -584,7 +802,6 @@ func (repo *MyRepository) SendImageSQL(ctx context.Context, rw http.ResponseWrit
 
 		json.NewEncoder(rw).Encode(response)
 
-		// Notofication(rep, ctx, rw, id_chat, id_user, text, sent_at) //уведомление пользователя
 	} else {
 
 		response := Response{
@@ -664,7 +881,77 @@ func (repo *MyRepository) SendImageSQL(ctx context.Context, rw http.ResponseWrit
 
 			json.NewEncoder(rw).Encode(response)
 
-			// Notofication(rep, ctx, rw, id_chat, id_user, text, sent_at) //уведомление пользователя
+			//достаём аву и имя
+			request, err = rep.Query(
+				ctx,
+				`
+						WITH i AS (
+							SELECT user_1_id, user_2_id 
+							FROM Chat.chats 
+							WHERE id = $1
+						)
+						SELECT COALESCE(
+							(SELECT user_1_id FROM i WHERE user_1_id != $2),
+							(SELECT user_2_id FROM i WHERE user_2_id != $2)
+						);
+					`,
+				id_chat,
+				id_user,
+			)
+			errorr(err)
+
+			var buddy_id int
+
+			for request.Next() {
+				err := request.Scan(
+					&buddy_id,
+				)
+				if err != nil {
+					fmt.Println(err)
+
+					continue
+				}
+			}
+
+			//достаём аву и имя
+			request, err = rep.Query(
+				ctx,
+				`
+			SELECT 
+				users.avatar_path,
+				COALESCE(individual_user.name, company_user.name_of_company),
+				users.user_role
+			FROM users.users
+			LEFT JOIN users.individual_user ON individual_user.user_id = users.id
+			LEFT JOIN users.company_user ON company_user.user_id = users.id
+			WHERE users.id = $1
+			`,
+				id_user,
+			)
+			errorr(err)
+
+			var user_role int
+			var avatar_path string
+			var name string
+
+			for request.Next() {
+				err := request.Scan(
+					&avatar_path,
+					&name,
+					user_role,
+				)
+				if err != nil {
+					fmt.Println(err)
+
+					continue
+				}
+			}
+
+			json.NewEncoder(rw).Encode(response)
+
+			Notification(ctx, buddy_id, conn[buddy_id], "message", id_chat, mess_id, "image", sent_at, id_user, user_role, ServeSpecificMediaBase64(rw, r, avatar_path), name, rdb)
+
+			return err
 
 		} else {
 
@@ -681,7 +968,7 @@ func (repo *MyRepository) SendImageSQL(ctx context.Context, rw http.ResponseWrit
 	return err
 }
 
-func (repo *MyRepository) SendMessageSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, id_chat, id_user int, text string) (err error) {
+func (repo *MyRepository) SendMessageSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, conn map[int]*websocket.Conn, id_chat, id_user int, text string, rdb *redis.Client) (err error) {
 	//текст есть, но изображений нет
 	request, err := rep.Query(
 		ctx,
@@ -741,6 +1028,74 @@ func (repo *MyRepository) SendMessageSQL(ctx context.Context, rw http.ResponseWr
 				continue
 			}
 		}
+
+		//достаём аву и имя
+		request, err = rep.Query(
+			ctx,
+			`
+				WITH i AS (
+					SELECT user_1_id, user_2_id 
+					FROM Chat.chats 
+					WHERE id = $1
+				)
+				SELECT COALESCE(
+					(SELECT user_1_id FROM i WHERE user_1_id != $2),
+					(SELECT user_2_id FROM i WHERE user_2_id != $2)
+				);
+			`,
+			id_chat,
+			id_user,
+		)
+		errorr(err)
+
+		var buddy_id int
+
+		for request.Next() {
+			err := request.Scan(
+				&buddy_id,
+			)
+			if err != nil {
+				fmt.Println(err)
+
+				continue
+			}
+		}
+
+		//достаём аву и имя
+		request, err = rep.Query(
+			ctx,
+			`
+			SELECT 
+				users.avatar_path,
+				COALESCE(individual_user.name, company_user.name_of_company),
+				users.user_role
+			FROM users.users
+			LEFT JOIN users.individual_user ON individual_user.user_id = users.id
+			LEFT JOIN users.company_user ON company_user.user_id = users.id
+			WHERE users.id = $1
+			`,
+
+			id_user,
+		)
+		errorr(err)
+
+		var user_role int
+		var avatar_path string
+		var name string
+
+		for request.Next() {
+			err := request.Scan(
+				&avatar_path,
+				&name,
+				&user_role,
+			)
+			if err != nil {
+				fmt.Println(err)
+
+				continue
+			}
+		}
+
 		response := Response{
 			Status:  "success",
 			Data:    Ints{Mess_id: mess_id, Text: text, Sent_at: sent_at},
@@ -748,6 +1103,8 @@ func (repo *MyRepository) SendMessageSQL(ctx context.Context, rw http.ResponseWr
 		}
 
 		json.NewEncoder(rw).Encode(response)
+
+		Notification(ctx, buddy_id, conn[buddy_id], "message", id_chat, mess_id, text, sent_at, id_user, user_role, ServeSpecificMediaBase64(rw, r, avatar_path), name, rdb)
 
 		return err
 	}
@@ -763,7 +1120,7 @@ func (repo *MyRepository) SendMessageSQL(ctx context.Context, rw http.ResponseWr
 	return err
 }
 
-func (repo *MyRepository) SendVideoSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, id_chat, id_user int, file_path []string) (err error) {
+func (repo *MyRepository) SendVideoSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, id_chat, id_user int, file_path []string, conn map[int]*websocket.Conn, rdb *redis.Client) (err error) {
 	request, err := rep.Query(
 		ctx,
 		`
@@ -871,7 +1228,7 @@ func (repo *MyRepository) SendVideoSQL(ctx context.Context, rw http.ResponseWrit
 			response := Response{
 				Status:  "success",
 				Data:    image,
-				Message: fmt.Sprintf("Фото № %d доставленно", attachments_id, "Сообщение № %d доставленно", mess_id),
+				Message: fmt.Sprintf("Фото № %d доставленно. Сообщение № %d доставленно", attachments_id, mess_id),
 			}
 
 			request, err := rep.Query(
@@ -893,9 +1250,77 @@ func (repo *MyRepository) SendVideoSQL(ctx context.Context, rw http.ResponseWrit
 				}
 			}
 
+			//достаём аву и имя
+			request, err = rep.Query(
+				ctx,
+				`
+						WITH i AS (
+							SELECT user_1_id, user_2_id 
+							FROM Chat.chats 
+							WHERE id = $1
+						)
+						SELECT COALESCE(
+							(SELECT user_1_id FROM i WHERE user_1_id != $2),
+							(SELECT user_2_id FROM i WHERE user_2_id != $2)
+						);
+					`,
+				id_chat,
+				id_user,
+			)
+			errorr(err)
+
+			var buddy_id int
+
+			for request.Next() {
+				err := request.Scan(
+					&buddy_id,
+				)
+				if err != nil {
+					fmt.Println(err)
+
+					continue
+				}
+			}
+
+			//достаём аву и имя
+			request, err = rep.Query(
+				ctx,
+				`
+			SELECT 
+				users.avatar_path,
+				COALESCE(individual_user.name, company_user.name_of_company),
+				users.user_role
+			FROM users.users
+			LEFT JOIN users.individual_user ON individual_user.user_id = users.id
+			LEFT JOIN users.company_user ON company_user.user_id = users.id
+			WHERE users.id = $1
+			`,
+				id_user,
+			)
+			errorr(err)
+
+			var user_role int
+			var avatar_path string
+			var name string
+
+			for request.Next() {
+				err := request.Scan(
+					&avatar_path,
+					&name,
+					&user_role,
+				)
+				if err != nil {
+					fmt.Println(err)
+
+					continue
+				}
+			}
+
 			json.NewEncoder(rw).Encode(response)
 
-			// Notofication(rep, ctx, rw, id_chat, id_user, text, sent_at) //уведомление пользователя
+			Notification(ctx, buddy_id, conn[buddy_id], "message", id_chat, mess_id, "image", sent_at, id_user, user_role, ServeSpecificMediaBase64(rw, r, avatar_path), name, rdb)
+
+			return err
 
 		} else {
 
@@ -919,7 +1344,7 @@ func (repo *MyRepository) PrintChatSQL(ctx context.Context, rw http.ResponseWrit
 		WITH i AS (
 			SELECT id AS chai_id, user_1_id, user_2_id
 			FROM chat.chats
-			WHERE user_1_id = $1 OR user_2_id = $1
+			WHERE user_1_id = $1 OR user_2_id = $1 OR mediator_id = $1
 		),
 		latest_messages AS (
 			SELECT DISTINCT ON (m.chat_id) m.sender_id, m.text, m.sent_at, m.chat_id, attachm.message_id
@@ -936,7 +1361,7 @@ func (repo *MyRepository) PrintChatSQL(ctx context.Context, rw http.ResponseWrit
 					WHEN user_2_id != $1 THEN user_2_id 
 				END AS buddy_id
 			FROM chat.chats
-			WHERE user_1_id = $1 OR user_2_id = $1
+			WHERE user_1_id = $1 OR user_2_id = $1 OR mediator_id = $1
 		),
 		buddy_info AS (
 			SELECT buddy.chai_id, name::text AS info

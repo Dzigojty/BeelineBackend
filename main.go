@@ -7,6 +7,8 @@ import (
 	"myproject/internal/app"
 	"myproject/internal/database"
 	"net/http"
+	"os"
+	"os/exec"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/julienschmidt/httprouter"
@@ -17,13 +19,14 @@ import (
 const apiUrl = "https://api.t-bank.com/v1/nominal-accounts" // Инициализация клиента Redis
 func NewRedisClient() *redis.Client {
 	return redis.NewClient(&redis.Options{
-		Addr:     "185.112.83.36:6379", // Проверьте, что адрес и порт верные
-		Password: "",                   // Если Redis настроен без пароля
-		DB:       0,                    // Используйте базу данных 0
+		Addr:     "127.0.0.1:6379", // Проверьте, что адрес и порт верные
+		Password: "",               // Если Redis настроен без пароля
+		DB:       0,                // Используйте базу данных 0
 	})
 }
 
 var redisClient = NewRedisClient() // Глобальный клиент Redis
+
 func main() {
 	ctx := context.Background()
 	// Инициализация подключения к базе данных
@@ -34,10 +37,10 @@ func main() {
 	defer dbpool.Close()
 
 	logFile := &lumberjack.Logger{
-		Filename:   "/root/home/beeline_project/beeline.log", //Имя лог-файла
-		MaxSize:    10,                                       // Максимальный размер файла в МБ
-		MaxBackups: 5,                                        // Максимальное количество копий
-		MaxAge:     30,                                       // Хранить логи 30 дней
+		Filename:   "/root/home/beeline/beeline.log", //Имя лог-файла
+		MaxSize:    10,                               // Максимальный размер файла в МБ
+		MaxBackups: 5,                                // Максимальное количество копий
+		MaxAge:     30,                               // Хранить логи 30 дней
 		Compress:   true,
 	}
 
@@ -47,16 +50,36 @@ func main() {
 	// Инициализация приложения
 	a := app.NewApp(ctx, dbpool)
 	r := httprouter.New()
+
 	// Определяем маршруты для приложения
 	a.Routes(r, ctx, dbpool, redisClient, logger)
+
 	// Применяем CORS middleware ко всем маршрутам
 	handlerWithCORS := corsMiddleware(r)
+
 	// Настройка сервера
-	srv := &http.Server{Addr: "185.112.83.36:8090",
+	srv := &http.Server{Addr: "127.0.0.1:8070", // 185.112.83.36.36
 		Handler: handlerWithCORS, // Используем обработчик с поддержкой CORS
 	}
+
+	// этап проверки тестов и их вывод
+	fmt.Println("Запуск тестов...")
+
+	cmd := exec.Command("go", "test", "./internal/services/user/test/signupUser_test.go", "-v")
+	cmd.Stdout = os.Stdout // Направляем вывод в стандартный поток
+	cmd.Stderr = os.Stderr // Направляем ошибки в стандартный поток
+
+	err = cmd.Run()
+	if err != nil {
+		fmt.Printf("Тесты завершились с ошибкой: %v\n", err)
+		os.Exit(1) // Завершаем с ненулевым кодом при ошибке
+	}
+
+	fmt.Println("Все тесты пройдены успешно.")
+	// конец этапа
+
 	// Запуск сервера
-	fmt.Println("Сервер запущен на http://185.112.83.36:8090")
+	fmt.Println("Сервер запущен на http://127.0.0.1:8070")
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Не удалось запустить сервер: %s\n", err)
 	}

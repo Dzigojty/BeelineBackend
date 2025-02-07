@@ -245,7 +245,7 @@ func (repo *MyRepository) WalletHistorySQL(ctx context.Context, rw http.Response
 		SELECT
 			transact.id,
 			COALESCE(users.avatar_path, '/home/'),
-			COALESCE(individual_user.name || ' ' || individual_user.patronymic, company_user.name_of_company) AS user_name,
+			COALESCE(COALESCE(individual_user.name || ' ' || individual_user.patronymic, company_user.name_of_company), 'Нет Имени') AS user_name,
 			transact.amount, 
 			transact.created_at, 
 			transact.typee
@@ -291,10 +291,10 @@ func (repo *MyRepository) WalletHistorySQL(ctx context.Context, rw http.Response
 		Message string     `json:"message"`
 	}
 
-	if err != nil || request == nil {
+	if err != nil || request == nil || len(products) == 0 {
 		response := Response{
 			Status:  "fatal",
-			Message: "Не прошла",
+			Message: "Транзакций не найденно",
 		}
 
 		rw.WriteHeader(http.StatusOK)
@@ -305,7 +305,7 @@ func (repo *MyRepository) WalletHistorySQL(ctx context.Context, rw http.Response
 	response := Response{
 		Status:  "success",
 		Data:    products,
-		Message: "Транзакция прошла успешно",
+		Message: "Транзакции успешно найденны",
 	}
 
 	rw.WriteHeader(http.StatusOK)
@@ -379,6 +379,362 @@ func (repo *MyRepository) WalletListSQL(ctx context.Context, rw http.ResponseWri
 		Status  string     `json:"status"`
 		Data    []WallHist `json:"data,omitempty"`
 		Message string     `json:"message"`
+	}
+
+	if err != nil || request == nil {
+		response := Response{
+			Status:  "fatal",
+			Message: "Не прошла",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+		return err
+	}
+
+	response := Response{
+		Status:  "success",
+		Data:    products,
+		Message: "Транзакция прошла успешно",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return
+}
+
+func (repo *MyRepository) FavProfilsFirstNewSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, user_id int) (err error) {
+	type FavProfils struct {
+		Owner_id    int
+		Avatar_path string
+		Avatar      string
+		User_name   string
+	}
+	products := []FavProfils{}
+
+	errorr(err)
+
+	request, err := rep.Query(
+		ctx,
+		`
+		SELECT
+			ads.owner_id,
+			COALESCE(users.Avatar_path::TEXT, '/home/') as User_avatar,
+			COALESCE(t3.Name::TEXT, t5.name_of_company::TEXT) as User_name
+		FROM
+			ads.favorite_ads
+		LEFT JOIN
+			ads.ads
+			ON ads.id = favorite_ads.ad_id
+		LEFT JOIN
+			users.individual_user t3
+			ON t3.user_id = ads.owner_id
+		LEFT JOIN
+			users.company_user t5
+			ON t5.user_id = ads.owner_id
+		LEFT JOIN
+			users.users
+			ON users.id = ads.owner_id
+		WHERE
+			favorite_ads.user_id = $1
+		ORDER BY favorite_ads.reg_at ASC
+		`,
+
+		user_id)
+
+	errorr(err)
+
+	for request.Next() {
+		p := FavProfils{}
+		err := request.Scan(
+			&p.Owner_id,
+			&p.Avatar_path,
+			&p.User_name,
+		)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		products = append(products, p)
+	}
+
+	for i := 0; i < len(products); i++ {
+		products[i].Avatar = ServeSpecificMediaBase64(rw, r, products[i].Avatar_path)
+	}
+
+	type Response struct {
+		Status  string       `json:"status"`
+		Data    []FavProfils `json:"data,omitempty"`
+		Message string       `json:"message"`
+	}
+
+	if err != nil || request == nil {
+		response := Response{
+			Status:  "fatal",
+			Message: "Не прошла",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+		return err
+	}
+
+	response := Response{
+		Status:  "success",
+		Data:    products,
+		Message: "Транзакция прошла успешно",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return
+}
+
+func (repo *MyRepository) FavProfilsFirstOldSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, user_id int) (err error) {
+	type FavProfils struct {
+		Owner_id    int
+		Avatar_path string
+		Avatar      string
+		User_name   string
+	}
+	products := []FavProfils{}
+
+	errorr(err)
+
+	request, err := rep.Query(
+		ctx,
+		`
+		SELECT
+			ads.owner_id,
+			COALESCE(users.Avatar_path::TEXT, '/home/') as User_avatar,
+			COALESCE(t3.Name::TEXT, t5.name_of_company::TEXT) as User_name
+		FROM
+			ads.favorite_ads
+		LEFT JOIN
+			ads.ads
+			ON ads.id = favorite_ads.ad_id
+		LEFT JOIN
+			users.individual_user t3
+			ON t3.user_id = ads.owner_id
+		LEFT JOIN
+			users.company_user t5
+			ON t5.user_id = ads.owner_id
+		LEFT JOIN
+			users.users
+			ON users.id = ads.owner_id
+		WHERE
+			favorite_ads.user_id = $1
+		ORDER BY favorite_ads.reg_at DESC
+		`,
+
+		user_id)
+
+	errorr(err)
+
+	for request.Next() {
+		p := FavProfils{}
+		err := request.Scan(
+			&p.Owner_id,
+			&p.Avatar_path,
+			&p.User_name,
+		)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		products = append(products, p)
+	}
+
+	for i := 0; i < len(products); i++ {
+		products[i].Avatar = ServeSpecificMediaBase64(rw, r, products[i].Avatar_path)
+	}
+
+	type Response struct {
+		Status  string       `json:"status"`
+		Data    []FavProfils `json:"data,omitempty"`
+		Message string       `json:"message"`
+	}
+
+	if err != nil || request == nil {
+		response := Response{
+			Status:  "fatal",
+			Message: "Не прошла",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+		return err
+	}
+
+	response := Response{
+		Status:  "success",
+		Data:    products,
+		Message: "Транзакция прошла успешно",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return
+}
+
+func (repo *MyRepository) FavProfilsFirstCheapSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, user_id int) (err error) {
+	type FavProfils struct {
+		Owner_id    int
+		Avatar_path string
+		Avatar      string
+		User_name   string
+	}
+	products := []FavProfils{}
+
+	errorr(err)
+
+	request, err := rep.Query(
+		ctx,
+		`
+		SELECT
+			ads.owner_id,
+			COALESCE(users.Avatar_path::TEXT, '/home/') as User_avatar,
+			COALESCE(t3.Name::TEXT, t5.name_of_company::TEXT) as User_name
+		FROM
+			ads.favorite_ads
+		LEFT JOIN
+			ads.ads
+			ON ads.id = favorite_ads.ad_id
+		LEFT JOIN
+			users.individual_user t3
+			ON t3.user_id = ads.owner_id
+		LEFT JOIN
+			users.company_user t5
+			ON t5.user_id = ads.owner_id
+		LEFT JOIN
+			users.users
+			ON users.id = ads.owner_id
+		WHERE
+			favorite_ads.user_id = $1
+		ORDER BY ads.hourly_rate ASC
+		`,
+
+		user_id)
+
+	errorr(err)
+
+	for request.Next() {
+		p := FavProfils{}
+		err := request.Scan(
+			&p.Owner_id,
+			&p.Avatar_path,
+			&p.User_name,
+		)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		products = append(products, p)
+	}
+
+	for i := 0; i < len(products); i++ {
+		products[i].Avatar = ServeSpecificMediaBase64(rw, r, products[i].Avatar_path)
+	}
+
+	type Response struct {
+		Status  string       `json:"status"`
+		Data    []FavProfils `json:"data,omitempty"`
+		Message string       `json:"message"`
+	}
+
+	if err != nil || request == nil {
+		response := Response{
+			Status:  "fatal",
+			Message: "Не прошла",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+		return err
+	}
+
+	response := Response{
+		Status:  "success",
+		Data:    products,
+		Message: "Транзакция прошла успешно",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return
+}
+
+func (repo *MyRepository) FavProfilsFirstDearlSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, user_id int) (err error) {
+	type FavProfils struct {
+		Owner_id    int
+		Avatar_path string
+		Avatar      string
+		User_name   string
+	}
+	products := []FavProfils{}
+
+	errorr(err)
+
+	request, err := rep.Query(
+		ctx,
+		`
+		SELECT
+			ads.owner_id,
+			COALESCE(users.Avatar_path::TEXT, '/home/') as User_avatar,
+			COALESCE(t3.Name::TEXT, t5.name_of_company::TEXT) as User_name
+		FROM
+			ads.favorite_ads
+		LEFT JOIN
+			ads.ads
+			ON ads.id = favorite_ads.ad_id
+		LEFT JOIN
+			users.individual_user t3
+			ON t3.user_id = ads.owner_id
+		LEFT JOIN
+			users.company_user t5
+			ON t5.user_id = ads.owner_id
+		LEFT JOIN
+			users.users
+			ON users.id = ads.owner_id
+		WHERE
+			favorite_ads.user_id = $1
+		ORDER BY ads.hourly_rate DESC
+		`,
+
+		user_id)
+
+	errorr(err)
+
+	for request.Next() {
+		p := FavProfils{}
+		err := request.Scan(
+			&p.Owner_id,
+			&p.Avatar_path,
+			&p.User_name,
+		)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		products = append(products, p)
+	}
+
+	for i := 0; i < len(products); i++ {
+		products[i].Avatar = ServeSpecificMediaBase64(rw, r, products[i].Avatar_path)
+	}
+
+	type Response struct {
+		Status  string       `json:"status"`
+		Data    []FavProfils `json:"data,omitempty"`
+		Message string       `json:"message"`
 	}
 
 	if err != nil || request == nil {

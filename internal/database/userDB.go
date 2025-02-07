@@ -1,7 +1,9 @@
 package database
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
@@ -9,8 +11,11 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"myproject/internal"
+	"math/big"
+	"mime/multipart"
+	function "myproject/internal"
 	"myproject/internal/jwt"
+	"myproject/internal/model"
 	"net/http"
 	"net/smtp"
 	"net/url"
@@ -25,12 +30,22 @@ import (
 	"github.com/rs/zerolog"
 )
 
+type Repository struct { // используется в пакете app и servicies
+	Pool *pgxpool.Pool
+}
+
 type MyRepository struct {
-	app *internal.Repository
+	app *Repository
+}
+
+type SignupHandler struct {
+	RedisClient *redis.Client
+	Logger      zerolog.Logger
+	CodeNum     int
 }
 
 func NewRepo(Ctx context.Context, dbpool *pgxpool.Pool) *MyRepository {
-	return &MyRepository{&internal.Repository{}}
+	return &MyRepository{&Repository{}}
 }
 
 type LegalUser struct {
@@ -71,13 +86,6 @@ type FileUploadRequest struct {
 	Data     []byte `json:"data"`
 }
 
-// Генерация имени файла на основе временной метки
-func generateFileName(extension, user_id, index string) string {
-	timestamp := time.Now().Format("010203084503") // ГГГГММДДччммсс
-
-	return fmt.Sprintf("image_%s_%s_%s.%s", timestamp, user_id, index, extension)
-}
-
 func UploadAvatar(rw http.ResponseWriter, imageBase64, directory, user_id, index string) (error, bool, string) {
 	// Проверяем, содержит ли строка базовые метаданные
 	if strings.HasPrefix(imageBase64, "data:image/png;base64,") {
@@ -100,7 +108,7 @@ func UploadAvatar(rw http.ResponseWriter, imageBase64, directory, user_id, index
 	fmt.Println("Decoded data length:", len(data))
 
 	// Генерируем уникальное имя файла
-	fileName := generateFileName("png", user_id, index)
+	fileName := function.GenerateFileName("png", user_id, index)
 
 	// Полный путь до файла
 	filePath := filepath.Join(directory, fileName)
@@ -251,48 +259,44 @@ func (repo *MyRepository) SigLegalUserEmailSQL(
 
 	Data,
 	file_path string) (err error) {
-	private_key, public_key := internal.GenerateRSAkeys()
-	type Dataa struct {
-		Id  int
-		Key string
-	}
 
 	type Response struct {
 		Status  string
-		Data    Dataa
+		Data    int
 		Message string
 	}
 	result, errors := rep.Query(ctx, `
 			WITH i AS (
 				INSERT INTO Users.users (
-					user_type, password_hash, email, updated_at, avatar_path, private_key
+					user_type, password_hash, email, avatar_path
 				)
-				VALUES ($1, $2, $3, $4, $5, $6) 
+				VALUES ($1, $2, $3, $4)
 				RETURNING id
 			)
 			INSERT INTO Users.company_user (
 				user_id, ind_num_taxp, name_of_company, address_name
 			)
-			SELECT i.id, $7, $8, $9 FROM i
+			SELECT i.id, $5, $6, $7 FROM i
 			RETURNING user_id;
 		`,
 		1,
 		hashedPassword,
 		email,
-		time.Now(),
 		file_path,
-		private_key,
 
 		ind_num_taxp,
 		name_of_company,
 		address_name,
 	)
+	errorr(err)
 
 	var User_id int
 	for result.Next() {
 		err := result.Scan(
 			&User_id,
 		)
+		fmt.Println(err)
+
 		if err != nil {
 			fmt.Println(err)
 			continue
@@ -306,7 +310,7 @@ func (repo *MyRepository) SigLegalUserEmailSQL(
 		rw.WriteHeader(http.StatusOK)
 		json.NewEncoder(rw).Encode(Response{
 			Status:  "fatal",
-			Message: "Введите корректный & уникальный логин и пароль ",
+			Message: "Введите корректный и уникальный логин и пароль ",
 		})
 
 		return
@@ -324,7 +328,7 @@ func (repo *MyRepository) SigLegalUserEmailSQL(
 	} else {
 		response := Response{
 			Status:  "success",
-			Data:    Dataa{Id: User_id, Key: public_key},
+			Data:    User_id,
 			Message: "The user has been successfully registered",
 		}
 
@@ -582,38 +586,68 @@ func (repo *MyRepository) SigNaturUserPhoneSQL(
 }
 
 type Login struct {
-	Id                        int    `json:"Id"`
-	Login                     string `json:"Login"`
-	Name                      string `json:"Name"`
-	Surname_or_Ind_num        string `json:"Surname_or_Ind_num"`
-	Patronomic_or_Addres_name string `json:"Patronomic_or_Addres_name"`
+	Id                        int     `json:"Id"`
+	Login                     string  `json:"Login"`
+	Name                      string  `json:"Name"`
+	Surname_or_Ind_num        string  `json:"Surname_or_Ind_num"`
+	Patronomic_or_Addres_name string  `json:"Patronomic_or_Addres_name"`
+	Rating                    float32 `json:"Rating"`
+	Total_balance             int     `json:"Total_balance"`
+	User_role                 int     `json:"User_role"`
 }
 
-func (repo *MyRepository) LoginSQL(ctx context.Context, rep *pgxpool.Pool, rw http.ResponseWriter, login, hashedPassword string, logger zerolog.Logger) (err error) {
+func (repo *MyRepository) CallbackSQL(ctx context.Context, rep *pgxpool.Pool, rw http.ResponseWriter, logger zerolog.Logger, userInfo model.YandexUserInfo) (err error) {
+	var userId int
+
 	var u Login
 
 	row := rep.QueryRow(ctx,
 		`
-			SELECT users.id,
-				users.email,
-				COALESCE(individual_user.Name::TEXT, company_user.Name_of_company::TEXT) AS Name,
-				COALESCE(individual_user.Surname::TEXT, company_user.Ind_num_taxp::TEXT) AS Surname_or_Ind_num,
-				COALESCE(individual_user.Patronymic::TEXT, company_user.Address_name::TEXT) AS Patronomic_or_Addres_name
-				FROM Users.users
-					LEFT JOIN Users.individual_user ON users.id = individual_user.user_id
-					LEFT JOIN Users.company_user ON users.id = company_user.user_id
-					WHERE (email = $1 AND password_hash = $2) 
-					OR (phone_number = $1 AND password_hash = $2);`,
-		login, hashedPassword)
+		SELECT users.id,
+			users.email,
+			COALESCE(individual_user.Name::TEXT, company_user.Name_of_company::TEXT) AS Name,
+			COALESCE(individual_user.Surname::TEXT, company_user.Ind_num_taxp::TEXT) AS Surname_or_Ind_num,
+			COALESCE(individual_user.Patronymic::TEXT, company_user.Address_name::TEXT) AS Patronomic_or_Addres_name,
+			users.rating,
+			wallets.total_balance,
+			users.user_role
+		FROM Users.users
+			LEFT JOIN Users.individual_user ON users.id = individual_user.user_id
+			LEFT JOIN Users.company_user ON users.id = company_user.user_id
+			JOIN finance.wallets ON users.id = wallets.user_id
+			WHERE email = $1 OR phone_number = $1;
+		`,
+		userInfo.Login)
 	err = row.Scan(
 		&u.Id,
 		&u.Login,
 		&u.Name,
 		&u.Surname_or_Ind_num,
 		&u.Patronomic_or_Addres_name,
+		&u.Rating,
+		&u.Total_balance,
+		&u.User_role,
+	)
+	err = row.Scan(
+		&userId,
 	)
 
-	errorr(err)
+	if userId == 0 {
+		response := model.Response{
+			Status:  "fatal",
+			Message: "Юзер должен указать доп параметры",
+		}
+
+		// Лог с контекстом
+		logger.Info().
+			Str("service", "login").
+			Int("port", 8080).
+			Msg("Пользователь должен указать доп данные")
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+		return
+	}
 
 	type User struct {
 		Information   Login  `json:"Information"`
@@ -645,11 +679,11 @@ func (repo *MyRepository) LoginSQL(ctx context.Context, rep *pgxpool.Pool, rw ht
 	}
 
 	// Генерация JWT токена
-	validToken_jwt, err := jwt.GenerateJWT("jwt", u.Id)
+	validToken_jwt, err := jwt.GenerateJWT("jwt", u.Id, u.User_role)
 	errorr(err)
 
 	// Генерация refresh токена
-	refresh_token, err := jwt.GenerateJWT("refresh", u.Id)
+	refresh_token, err := jwt.GenerateJWT("refresh", u.Id, u.User_role)
 	errorr(err)
 
 	user := User{
@@ -686,7 +720,175 @@ func (repo *MyRepository) LoginSQL(ctx context.Context, rep *pgxpool.Pool, rw ht
 		SameSite: http.SameSiteLaxMode,
 	}
 
-	fmt.Printf("Кука установлена: %v\n", cookie)
+	_ = cookie
+
+	response := Response{
+		Status:  "success",
+		Data:    user,
+		Message: "You have successfully logged in",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+	return
+}
+
+func (repo *MyRepository) RecoveryPassSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, redisClient *redis.Client, user_id int, passwd string) (err error) {
+	request, err := rep.Query(
+		ctx,
+		`UPDATE users.users SET password_hash = $1 WHERE id = $2 RETURNING id;`,
+		passwd,
+		user_id)
+
+	errorr(err)
+
+	var id int
+
+	for request.Next() {
+		err := request.Scan(
+			&id,
+		)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    int    `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	if err != nil || id != 0 {
+		response := Response{
+			Status:  "success",
+			Data:    id,
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return err
+	}
+
+	response := Response{
+		Status:  "fatal",
+		Message: "Не показано",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return err
+}
+
+func (repo *MyRepository) LoginSQL(ctx context.Context, rep *pgxpool.Pool, rw http.ResponseWriter, login, hashedPassword string, logger zerolog.Logger) (err error) {
+	var u Login
+
+	row := rep.QueryRow(ctx,
+		`
+		SELECT users.id,
+			users.email,
+			COALESCE(individual_user.Name::TEXT, company_user.Name_of_company::TEXT) AS Name,
+			COALESCE(individual_user.Surname::TEXT, company_user.Ind_num_taxp::TEXT) AS Surname_or_Ind_num,
+			COALESCE(individual_user.Patronymic::TEXT, company_user.Address_name::TEXT) AS Patronomic_or_Addres_name,
+			users.rating,
+			wallets.total_balance,
+			users.user_role
+		FROM Users.users
+			LEFT JOIN Users.individual_user ON users.id = individual_user.user_id
+			LEFT JOIN Users.company_user ON users.id = company_user.user_id
+			JOIN finance.wallets ON users.id = wallets.user_id
+			WHERE (email = $1 AND password_hash = $2) 
+			OR (phone_number = $1 AND password_hash = $2);`,
+		login, hashedPassword)
+	err = row.Scan(
+		&u.Id,
+		&u.Login,
+		&u.Name,
+		&u.Surname_or_Ind_num,
+		&u.Patronomic_or_Addres_name,
+		&u.Rating,
+		&u.Total_balance,
+		&u.User_role,
+	)
+
+	errorr(err)
+
+	type User struct {
+		Information   Login  `json:"Information"`
+		JWT           string `json:"JWT"`
+		Refresh_token string `json:"Refresh_token"`
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    User   `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	if err != nil || u.Id == 0 {
+		response := Response{
+			Status:  "fatal",
+			Message: err.Error(),
+		}
+
+		// Лог с контекстом
+		logger.Info().
+			Str("service", "login").
+			Int("port", 8080).
+			Msg("The user entered an invalid username or password")
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+		return
+	}
+
+	// Генерация JWT токена
+	validToken_jwt, err := jwt.GenerateJWT("jwt", u.Id, u.User_role)
+	errorr(err)
+
+	// Генерация refresh токена
+	refresh_token, err := jwt.GenerateJWT("refresh", u.Id, u.User_role)
+	errorr(err)
+
+	user := User{
+		Information:   u,
+		JWT:           validToken_jwt,
+		Refresh_token: refresh_token,
+	}
+
+	// Установка куки
+	livingTime := 60 * time.Minute
+	expiration := time.Now().Add(livingTime)
+	cookie := http.Cookie{
+		Name:     "token",
+		Value:    url.QueryEscape(validToken_jwt),
+		Expires:  expiration,
+		Path:     "/",             // Убедитесь, что путь корректен
+		Domain:   "185.112.83.36", // IP-адрес вашего сервера
+		HttpOnly: true,
+		Secure:   false, // Для HTTP можно оставить false
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	// Установка куки
+	livingTime = 30 * 24 * time.Hour //не смог найти чего-то получше
+	expiration = time.Now().Add(livingTime)
+	cookie = http.Cookie{
+		Name:     "token",
+		Value:    url.QueryEscape(refresh_token),
+		Expires:  expiration,
+		Path:     "/",             // Убедитесь, что путь корректен
+		Domain:   "185.112.83.36", // IP-адрес вашего сервера
+		HttpOnly: true,
+		Secure:   false, // Для HTTP можно оставить false
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	_ = cookie
 
 	response := Response{
 		Status:  "success",
@@ -701,9 +903,12 @@ func (repo *MyRepository) LoginSQL(ctx context.Context, rep *pgxpool.Pool, rw ht
 
 func (repo *MyRepository) DisputeChatPanelSQL(ctx context.Context, rep *pgxpool.Pool, rw http.ResponseWriter) (err error) {
 	type Chat struct {
-		ID        int
+		Chat_id   int
 		User_1_id int
+		Name1     string
 		User_2_id int
+		Name2     string
+		Text      string
 		Ad_id     int
 	}
 	products := []Chat{}
@@ -716,17 +921,44 @@ func (repo *MyRepository) DisputeChatPanelSQL(ctx context.Context, rep *pgxpool.
 
 	request, err := rep.Query(
 		ctx,
-		`SELECT id, user_1_id, user_2_id, ad_id FROM chat.chats 
-			WHERE have_disput = true AND (mediator_id IS NULL) AND statee = false;`)
+		`
+		SELECT DISTINCT ON (chats.id)
+			chats.id AS chat_id,
+			chats.user_1_id,
+			COALESCE(individual_user_1.name, company_user_1.name_of_company) AS user_1_name,
+			chats.user_2_id,
+			COALESCE(individual_user_2.name, company_user_2.name_of_company) AS user_2_name,
+			COALESCE(messages.text, 'Нет сообщений') AS last_message_text,
+			chats.ad_id
+		FROM chat.chats
+		LEFT JOIN users.individual_user AS individual_user_1 
+			ON individual_user_1.user_id = chats.user_1_id
+		LEFT JOIN users.company_user AS company_user_1 
+			ON company_user_1.user_id = chats.user_1_id
+		LEFT JOIN users.individual_user AS individual_user_2 
+			ON individual_user_2.user_id = chats.user_2_id
+		LEFT JOIN users.company_user AS company_user_2 
+			ON company_user_2.user_id = chats.user_2_id
+		LEFT JOIN chat.messages
+			ON messages.chat_id = chats.id
+		WHERE chats.have_disput = true
+		AND (chats.mediator_id IS NULL)
+		AND chats.state = false
+		-- Важно!
+		ORDER BY chats.id, COALESCE(messages.text, 'Нет сообщений') DESC;  -- или по другому полю, указывающему "последнее" сообщение
+		`)
 
 	errorr(err)
 
 	for request.Next() {
 		p := Chat{}
 		err := request.Scan(
-			&p.ID,
+			&p.Chat_id,
 			&p.User_1_id,
+			&p.Name1,
 			&p.User_2_id,
+			&p.Name2,
+			&p.Text,
 			&p.Ad_id,
 		)
 		if err != nil {
@@ -743,7 +975,31 @@ func (repo *MyRepository) DisputeChatPanelSQL(ctx context.Context, rep *pgxpool.
 		Message string `json:"message"`
 	}
 
-	if err == nil && request != nil && len(products) != 0 {
+	if len(products) == 0 {
+		val := []Chat{}
+		val = append(val, Chat{
+			Chat_id:   0,
+			User_1_id: 0,
+			Name1:     "",
+			User_2_id: 0,
+			Name2:     "",
+			Text:      "",
+			Ad_id:     0,
+		})
+
+		response := Response{
+			Status:  "success",
+			Data:    val,
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
+
+	if err == nil && request != nil {
 		response := Response{
 			Status:  "success",
 			Data:    products,
@@ -1759,4 +2015,622 @@ func (repo *MyRepository) AllAdsOfThisUserSQL(ctx context.Context, rw http.Respo
 	rw.WriteHeader(http.StatusOK)
 	json.NewEncoder(rw).Encode(response)
 	return
+}
+
+func (repo *MyRepository) RecoveryPasswdEmailSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, redisClient *redis.Client, email string) (err error) {
+	type Data struct {
+		Email_name     string `json:"Email_name"`
+		ValidToken_jwt string `json:"ValidToken_jwt"`
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    Data   `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	var id int
+	request := rep.QueryRow(
+		ctx, `
+		SELECT users.id
+		FROM Users.users
+			LEFT JOIN Users.individual_user ON users.id = individual_user.user_id
+			LEFT JOIN Users.company_user ON users.id = company_user.user_id
+		WHERE email = $1;`,
+		email)
+	err = request.Scan(&id)
+	errorr(err)
+
+	if id == 0 {
+		response := Response{
+			Status:  "fatal",
+			Message: "Логине не принят",
+		}
+
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
+
+	// Настройки SMTP-сервера
+	smtpHost := "smtp.mail.ru"
+	smtpPort := "587"
+
+	// Данные отправителя (ваша почта и пароль приложения)
+	senderEmail := "parpatt_test@mail.ru"
+	password := "X0h72ndPXchhjWZ4vbyT" // Пароль приложения
+
+	// Получатель
+	recipientEmail := email
+
+	// Сообщение
+	subject := "Subject: Тебя беспокоит служба безопасности сбербанка.\n"
+	body := "Введи этот код.\n"
+	codeNum := 777 // Здесь лучше использовать случайный код
+	message := []byte(subject + "\n" + body + strconv.Itoa(codeNum))
+
+	// Авторизация для отправки email
+	auth := smtp.PlainAuth("", senderEmail, password, smtpHost)
+
+	// Устанавливаем обычное нешифрованное соединение
+	client, err := smtp.Dial(smtpHost + ":" + smtpPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Используем команду STARTTLS для начала TLS-сессии
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, // Это нужно убрать в продакшене
+		ServerName:         smtpHost,
+	}
+
+	if err = client.StartTLS(tlsConfig); err != nil {
+		log.Fatal(err)
+	}
+
+	// Старт авторизации
+	if err = client.Auth(auth); err != nil {
+		log.Fatal(err)
+	}
+
+	// Установка адреса отправителя
+	if err = client.Mail(senderEmail); err != nil {
+		log.Fatal(err)
+	}
+
+	// Установка адреса получателя
+	if err = client.Rcpt(recipientEmail); err != nil {
+		log.Fatal(err)
+	}
+
+	// Отправка сообщения
+	w, err := client.Data()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = w.Write(message)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = w.Close()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Завершение сеанса
+	client.Quit()
+
+	// Генерация JWT токена
+	ValidToken_jwt, err := jwt.GenerateJWT("jwt_for_proof", 0, 0)
+	errorr(err)
+
+	// Установка куки
+	livingTime := 10 * time.Minute //не смог найти чего-то получше
+	expiration := time.Now().Add(livingTime)
+	cookie := http.Cookie{
+		Name:     "token",
+		Value:    url.QueryEscape(ValidToken_jwt),
+		Expires:  expiration,
+		Path:     "/",             // Убедитесь, что путь корректен
+		Domain:   "185.112.83.36", // IP-адрес вашего сервера
+		HttpOnly: true,
+		Secure:   false, // Для HTTP можно оставить false
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	fmt.Printf("Кука установлена: %v\n", cookie)
+
+	CodeNum := 777 // Здесь лучше использовать случайный код
+
+	type Kesh struct {
+		CodeNum    int
+		Email_name string
+	}
+
+	// Преобразуем структуру kesh в JSON
+	keshData, err := json.Marshal(Kesh{CodeNum: CodeNum, Email_name: email})
+	errorr(err)
+
+	// Сохраняем код подтверждения в Redis с TTL 10 минут
+	err = redisClient.Set(ctx, ValidToken_jwt, keshData, 10*time.Minute).Err()
+	errorr(err)
+
+	if err != nil || ValidToken_jwt == "" {
+		response := Response{
+			Status:  "fatal",
+			Message: "Почта не принята",
+		}
+
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
+
+	response := Response{
+		Status:  "success",
+		Data:    Data{email, ValidToken_jwt},
+		Message: "Почта принята",
+	}
+
+	json.NewEncoder(rw).Encode(response)
+
+	return
+}
+
+func (h *SignupHandler) RecoveryPasswdPhoneSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, redisClient *redis.Client, phone_num string) (err error) {
+	type Data struct {
+		Phone_num      string `json:"Phone_num"`
+		ValidToken_jwt string `json:"ValidToken_jwt"`
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    Data   `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	var id int
+	request := rep.QueryRow(
+		ctx, `
+		SELECT users.id
+		FROM Users.users
+			LEFT JOIN Users.individual_user ON users.id = individual_user.user_id
+			LEFT JOIN Users.company_user ON users.id = company_user.user_id
+		WHERE phone_number = $1;`,
+		phone_num)
+	err = request.Scan(&id)
+	errorr(err)
+
+	if id == 0 {
+		response := Response{
+			Status:  "fatal",
+			Message: "Логине не принят",
+		}
+
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
+
+	type Kesh struct {
+		Phone_num string
+		Code      int
+	}
+
+	// Генерация случайного кода
+	// Диапазон четырёхзначных чисел: от 1000 до 9999
+	min, max := 1000, 9999
+	// Вычисляем размер диапазона
+	rangeSize := big.NewInt(int64(max - min + 1))
+	// Генерируем случайное число в диапазоне от 0 до rangeSize-1
+	n, err := rand.Int(rand.Reader, rangeSize)
+	if err != nil {
+		// logger.Err(err).Msg(fmt.Sprintf("error in %s", op+"; Ошибка генерации случайного числа"))
+
+		return
+	}
+	// Смещаем результат, чтобы получить число в диапазоне от min до max
+	h.CodeNum = int(n.Int64() + int64(min)) // искомое число
+
+	// Преобразуем структуру kesh в JSON
+	keshData, err := json.Marshal(Kesh{Phone_num: phone_num, Code: h.CodeNum})
+	if err != nil {
+		// logger.Err(err).Msg(" error in internal.services.user.SignupUserByPhone; ошибка с структурой json или преобразованием типа")
+
+		return
+	}
+
+	request_url := "https://zvonok.com/manager/cabapi_external/api/v1/phones/flashcall/"
+
+	// Создание буфера для тела запроса
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+
+	// Добавление полей в multipart-запрос
+	writer.WriteField("public_key", "ba885d6d0342490a50c6bf5603d75719")
+	writer.WriteField("phone", phone_num)
+	writer.WriteField("campaign_id", "1771893356")
+	writer.WriteField("phone_suffix", strconv.Itoa(h.CodeNum))
+
+	// Закрытие writer (важно!)
+	writer.Close()
+
+	// Создание HTTP-запроса
+	req, err := http.NewRequest("POST", request_url, &requestBody)
+	if err != nil {
+		fmt.Println("Ошибка при создании запроса:", err)
+		os.Exit(1)
+	}
+
+	// Установка заголовка Content-Type
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	// Отправка запроса
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Ошибка при выполнении запроса:", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	// Чтение ответа
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(resp.Body)
+	fmt.Println("Ответ от сервера:", buf.String())
+
+	// Генерация JWT токена
+	ValidToken_jwt, err := jwt.GenerateJWT("jwt_for_proof", 0, 0)
+	errorr(err)
+
+	// Установка куки
+	livingTime := 10 * time.Minute //не смог найти чего-то получше
+	expiration := time.Now().Add(livingTime)
+	cookie := http.Cookie{
+		Name:     "token",
+		Value:    url.QueryEscape(ValidToken_jwt),
+		Expires:  expiration,
+		Path:     "/",             // Убедитесь, что путь корректен
+		Domain:   "185.112.83.36", // IP-адрес вашего сервера
+		HttpOnly: true,
+		Secure:   false, // Для HTTP можно оставить false
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	_ = cookie
+
+	// Сохраняем код подтверждения в Redis с TTL 10 минут
+	err = redisClient.Set(ctx, ValidToken_jwt, keshData, 10*time.Minute).Err()
+	errorr(err)
+
+	if err != nil || ValidToken_jwt == "" {
+		response := Response{
+			Status:  "fatal",
+			Message: "Почта не принята",
+		}
+
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
+
+	response := Response{
+		Status:  "success",
+		Data:    Data{phone_num, ValidToken_jwt},
+		Message: "Почта принята",
+	}
+
+	json.NewEncoder(rw).Encode(response)
+
+	return
+}
+
+func (repo *MyRepository) SendCodeSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, redisClient *redis.Client, token *http.Cookie, code int) (err error) {
+	// Получаем данные из Redis
+	keshData, err := redisClient.Get(ctx, token.Value).Result()
+	if err == redis.Nil {
+		log.Println("Ключ не найден")
+		http.Error(rw, "Код не найден или истек", http.StatusUnauthorized)
+		return
+	} else if err != nil {
+		log.Fatal("Ошибка при получении данных из Redis:", err)
+		http.Error(rw, "Ошибка сервера", http.StatusInternalServerError)
+		return
+	}
+
+	type Kesh struct {
+		CodeNum    int
+		Email_name string
+	}
+
+	// Десериализуем JSON обратно в структуру kesh
+	var storedKesh Kesh
+	err = json.Unmarshal([]byte(keshData), &storedKesh)
+	if err != nil {
+		log.Fatal("Ошибка при десериализации данных из Redis:", err)
+		http.Error(rw, "Ошибка сервера", http.StatusInternalServerError)
+		return
+	}
+
+	// Проверяем код
+	if code == storedKesh.CodeNum && code != 0 && storedKesh.CodeNum != 0 {
+		type Data struct {
+			ValidToken_jwt string `json:"ValidToken_jwt"`
+		}
+
+		type Response struct {
+			Status  string `json:"status"`
+			Data    Data   `json:"data,omitempty"`
+			Message string `json:"message"`
+		}
+
+		// Генерация JWT токена
+		ValidToken_jwt, err := jwt.GenerateJWT("jwt_for_proof", 0, 0)
+		errorr(err)
+
+		fmt.Println("JWT токен в строковом формате: ", ValidToken_jwt)
+
+		// Установка куки
+		livingTime := 10 * time.Minute //не смог найти чего-то получше
+		expiration := time.Now().Add(livingTime)
+		cookie := http.Cookie{
+			Name:     "token",
+			Value:    url.QueryEscape(ValidToken_jwt),
+			Expires:  expiration,
+			Path:     "/",             // Убедитесь, что путь корректен
+			Domain:   "185.112.83.36", // IP-адрес вашего сервера
+			HttpOnly: true,
+			Secure:   false, // Для HTTP можно оставить false
+			SameSite: http.SameSiteLaxMode,
+		}
+
+		fmt.Printf("Кука установлена: %v\n", cookie)
+
+		CodeNum := 777 // Здесь лучше использовать случайный код
+
+		type Kesh struct {
+			CodeNum    int
+			Email_name string
+		}
+
+		// Преобразуем структуру kesh в JSON
+		keshData, err := json.Marshal(Kesh{CodeNum: CodeNum, Email_name: storedKesh.Email_name})
+		errorr(err)
+
+		// Сохраняем код подтверждения в Redis с TTL 10 минут
+		err = redisClient.Set(ctx, ValidToken_jwt, keshData, 10*time.Minute).Err()
+		errorr(err)
+
+		rw.WriteHeader(http.StatusOK)
+
+		if err != nil || ValidToken_jwt == "" {
+			response := Response{
+				Status:  "fatal",
+				Message: "Почта не принята",
+			}
+
+			json.NewEncoder(rw).Encode(response)
+
+			return err
+		}
+
+		response := Response{
+			Status:  "success",
+			Data:    Data{ValidToken_jwt},
+			Message: "Почта принята",
+		}
+
+		json.NewEncoder(rw).Encode(response)
+
+		if err != nil {
+			log.Fatal(err)
+		}
+		rw.Write([]byte("Смена завершена успешно"))
+		return err
+
+	} else {
+		http.Error(rw, "Неверный код подтверждения", http.StatusUnauthorized)
+		return err
+
+	}
+}
+
+func (repo *MyRepository) EnterPasswdSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, redisClient *redis.Client, token *http.Cookie, passwd string) (err error) {
+	// Получаем данные из Redis
+	keshData, err := redisClient.Get(ctx, token.Value).Result()
+	if err == redis.Nil {
+		log.Println("Ключ не найден")
+		http.Error(rw, "Код не найден или истек", http.StatusUnauthorized)
+		return
+	} else if err != nil {
+		log.Fatal("Ошибка при получении данных из Redis:", err)
+		http.Error(rw, "Ошибка сервера", http.StatusInternalServerError)
+		return
+	}
+
+	type Kesh struct {
+		CodeNum    int
+		Email_name string
+	}
+
+	// Десериализуем JSON обратно в структуру kesh
+	var storedKesh Kesh
+	err = json.Unmarshal([]byte(keshData), &storedKesh)
+	if err != nil {
+		log.Fatal("Ошибка при десериализации данных из Redis:", err)
+		http.Error(rw, "Ошибка сервера", http.StatusInternalServerError)
+		return
+	}
+
+	request, err := rep.Query(
+		ctx,
+		`
+		UPDATE users.users SET password_hash = $1 WHERE email = $2 OR phone_number = $2 RETURNING id;
+		`,
+		passwd,
+		storedKesh.Email_name)
+
+	var user_idd int
+
+	for request.Next() {
+		err := request.Scan(
+			&user_idd,
+		)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    int    `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	if err == nil || user_idd != 0 {
+		response := Response{
+			Status:  "success",
+			Data:    user_idd,
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return err
+	}
+
+	response := Response{
+		Status:  "fatal",
+		Message: "Не показано",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return err
+}
+
+func (repo *MyRepository) AddAddressSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, redisClient *redis.Client, user_id int, adress string) (err error) {
+
+	type Response struct {
+		Status  string
+		Data    int
+		Message string
+	}
+	result, errors := rep.Query(ctx, `
+		INSERT INTO Users.address (user_id, address_name)
+		VALUES ($1, $2)
+		RETURNING user_id;
+		`,
+		user_id,
+		adress,
+	)
+	errorr(err)
+
+	var User_id int
+	for result.Next() {
+		err := result.Scan(
+			&User_id,
+		)
+		fmt.Println(err)
+
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+	}
+
+	if User_id == 0 || errors != nil {
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(Response{
+			Status:  "fatal",
+			Message: "Введите корректный и уникальный адрес ",
+		})
+
+		return
+	} else if errors != nil {
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(Response{
+			Status:  "fatal",
+			Message: errors.Error(),
+		})
+
+		return
+	} else {
+		response := Response{
+			Status:  "success",
+			Data:    User_id,
+			Message: "Адрес добавлен",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
+}
+
+func (repo *MyRepository) GiveAddressSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, redisClient *redis.Client, user_id int) (err error) {
+
+	type Response struct {
+		Status  string
+		Data    []string
+		Message string
+	}
+	result, errors := rep.Query(ctx, `
+			SELECT address_name FROM Users.address WHERE user_id = $1
+		`,
+		user_id,
+	)
+	errorr(err)
+
+	var address string
+	address_mass := []string{}
+
+	for result.Next() {
+		err := result.Scan(
+			&address,
+		)
+		fmt.Println(err)
+
+		address_mass = append(address_mass, address)
+
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+	}
+
+	if address == "" || errors != nil {
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(Response{
+			Status:  "fatal",
+			Message: "Введите корректный и уникальный адрес ",
+		})
+
+		return
+	} else if errors != nil {
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(Response{
+			Status:  "fatal",
+			Message: errors.Error(),
+		})
+
+		return
+	} else {
+		response := Response{
+			Status:  "success",
+			Data:    address_mass,
+			Message: "Адрес добавлен",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
 }

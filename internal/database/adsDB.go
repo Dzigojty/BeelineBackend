@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-redis/redis/v8"
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/rs/zerolog"
 )
 
 func ConvertToString(oldStr *string) string {
@@ -50,16 +53,26 @@ func (repo *MyRepository) ProductListSQL(ctx context.Context, rw http.ResponseWr
 		ctx,
 		`
 		WITH duration AS (
-			SELECT 
-				ads.id,
-				ads.owner_id,
-				ARRAY[
-					MAX(bookings.starts_at),
-					MAX(bookings.ends_at)
-				] AS date_range
-			FROM ads.ads, orders.bookings
-			WHERE ads.id = ANY($2::INT[]) AND bookings.ads_id = ads.id
-			GROUP BY ads.id, ads.owner_id
+			WITH duration AS (
+				SELECT
+					ads.id,
+					ads.owner_id,
+					ARRAY[
+						COALESCE(MAX(bookings.starts_at), '1900-01-01'),
+						COALESCE(MAX(bookings.ends_at), '1900-01-01')
+					] AS date_range
+				FROM 
+					ads.ads
+				LEFT JOIN 
+					orders.bookings
+				ON 
+					bookings.ads_id = ads.id
+				WHERE 
+					ads.id = ANY($2::INT[])
+				GROUP BY 
+					ads.id, ads.owner_id
+			)
+			SELECT * FROM duration
 		)
 		SELECT
 			COALESCE(t1.File_path::TEXT, '/root/') AS Ads_path,
@@ -197,6 +210,7 @@ type ForPrintAds struct {
 	Owner_rating float32       `json:"Owner_rating"`
 	Duration     string        `json:"Duration"`
 	Ads_count    int           `json:"Ads_count"`
+	Category_id  int           `json:"Category_id"`
 }
 
 func (repo *MyRepository) PrintAdsSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, ads_id int) (err error) {
@@ -282,10 +296,19 @@ func (repo *MyRepository) PrintAdsSQL(ctx context.Context, rw http.ResponseWrite
 		COALESCE(ind_us.Name::TEXT, comp_us.name_of_company::TEXT) AS owner_name,
 		t4.avatar_path AS Avatar_path,
 		t4.rating,
-		COALESCE((Duration(
-			(SELECT d.date_range::date[] FROM duration d WHERE d.id = t2.id)
-		))[1], 'Нет точной информации') AS Duration,
-		ads_info.ads_count
+		COALESCE(
+		    (Duration(
+		        (SELECT COALESCE(
+		            NULLIF(array_remove(d.date_range, NULL), '{}'), -- Удаление NULL и проверка на пустой массив
+		            ARRAY['2024-12-12'::date, '2024-12-14'::date]
+		        ) 
+		        FROM duration d 
+		        WHERE d.id = t2.id)
+		    ))[1],
+		    'Нет точной информации'
+		) AS Duration,
+		ads_info.ads_count,
+		t2.category_id
 	FROM
 		ads.ads t2
 	LEFT JOIN
@@ -347,6 +370,7 @@ func (repo *MyRepository) PrintAdsSQL(ctx context.Context, rw http.ResponseWrite
 			&rev.Owner_rating,
 			&rev.Duration,
 			&rev.Ads_count,
+			&rev.Category_id,
 		)
 
 		rev.Updated_at = int(Updated_at_int.Unix())
@@ -362,13 +386,11 @@ func (repo *MyRepository) PrintAdsSQL(ctx context.Context, rw http.ResponseWrite
 		if len(rev.File_path) > 0 {
 			for i := 0; i < len(rev.File_path); i++ {
 				rev.Images = append(rev.Images, ServeSpecificMediaBase64(rw, r, rev.File_path[i]))
-				rev.File_path[i] = "/home/"
 			}
 		}
 		if len(*Avatar_path_cost) > 0 {
 			for i := 0; i < len(*Avatar_path_cost); i++ {
 				Avatar_cost = append(Avatar_cost, ServeSpecificMediaBase64(rw, r, (*Avatar_path_cost)[i]))
-				(*Avatar_path_cost)[i] = "/home/"
 			}
 		}
 
@@ -411,7 +433,6 @@ func (repo *MyRepository) PrintAdsSQL(ctx context.Context, rw http.ResponseWrite
 		}
 
 		rev.Avatar = ServeSpecificMediaBase64(rw, r, rev.Avatar_path)
-		rev.Avatar_path = "/home/"
 
 		prod = append(prod, rev)
 	}
@@ -446,43 +467,68 @@ func (repo *MyRepository) PrintAdsSQL(ctx context.Context, rw http.ResponseWrite
 	return err
 }
 
-func (repo *MyRepository) SortProductListDailyRateSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, category []int, lowNum, higNum int, lowDate, higDate time.Time, position []float64, distance, rating int) (err error) {
+func (repo *MyRepository) SortProductListDailyRateSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, list int, size int, category []int, lowNum, higNum int, lowDate, higDate time.Time, position []float64, location string, distance, rating int) (err error) {
 	type Product struct {
 		Id *int
 
-		Ads_path  *string
+		Ads_path  string
 		Ads_photo string
 
 		Daily_rate         *int
 		Title              *string
+		Description        *string
 		Category_id        *int
 		Name               *string
 		Surname_or_ind_num *string
 		Owner_id           *int
-		Rating             *float64
+		Rating             *float32
+		Location           string
 
-		Avatar_path  *string
+		Avatar_path  string
 		Avatar_photo string
+
+		Review_count int
+		Duration     string
 	}
 	products := []Product{}
-
-	errorr(err)
 
 	request, err := rep.Query(
 		ctx,
 		`
+		WITH duration AS (
+			SELECT
+				ads.id,
+				ads.owner_id,
+				ARRAY[
+					COALESCE(MAX(bookings.starts_at), '1900-01-01'),
+					COALESCE(MAX(bookings.ends_at), '1900-01-01')
+				] AS date_range
+			FROM 
+				ads.ads
+			LEFT JOIN 
+				orders.bookings
+			ON 
+				bookings.ads_id = ads.id
+			GROUP BY 
+				ads.id, ads.owner_id
+		)
 		SELECT DISTINCT ON (t2.Id)
 			t2.Id,
-			t1.File_path::TEXT,
+			COALESCE(t1.File_path::TEXT, '/home/'),
 			t2.Daily_rate,
 			t2.Title::TEXT,
+			t2.Description,
 			t2.Category_id,
 			COALESCE(t3.name::TEXT, t5.name_of_company::TEXT) AS Name,
 			COALESCE(t3.surname::TEXT, t5.ind_num_taxp::TEXT) AS Surname_or_ind_num,
 			t2.Owner_id,
 			t4.Rating,
-			t4.Avatar_path
-
+			t4.Avatar_path,
+			(Review_count(ARRAY[t2.id]::INT[]))[1],
+			COALESCE((Duration(
+				(SELECT d.date_range::date[] FROM duration d WHERE d.id = t2.id)
+			))[1], 'Нет точной информации'),
+			t2.Location
 		FROM
 			ads.ads t2
 		LEFT JOIN
@@ -494,56 +540,58 @@ func (repo *MyRepository) SortProductListDailyRateSQL(ctx context.Context, rw ht
 			users.company_user t5 ON t5.user_id = t2.owner_id
 		INNER JOIN
 			users.users t4 ON t2.owner_id = t4.id
-
 		WHERE
+			t2.status = true AND
+			(t2.Location ILIKE $10 OR t2.Location ILIKE '%' || $11 || '%' OR $11 ILIKE '%' || t2.Location || '%') AND
 			(cardinality($1::INT[]) = 0 OR t2.category_id = ANY($1::INT[]))
-		-- сортировка по категориям
-		
 			AND $2 <= t2.Daily_rate AND t2.Daily_rate <= $3
-		-- сортировка по цене
-
 			AND EXISTS (
-		WITH booking_array AS (
-			SELECT 
-				array_agg(bookings.starts_at) AS starts_at_list,
-				array_agg(bookings.ends_at) AS ends_at_list,
-				array_agg(bookings.id) AS bookings_id_list,
-				bookings.ads_id AS ads_id_list
-			FROM 
-				orders.bookings AS bookings
-			LEFT JOIN 
-				orders.orders AS orders 
-			ON 
-				bookings.ads_id = t2.id AND orders.id = bookings.order_id
-			GROUP BY 
-				bookings.ads_id
-		)
-		SELECT 
-			CASE 
-				WHEN booking_array.ads_id_list IS NULL -- Проверка, если записей нет
-					THEN TRUE
-					WHEN ($4 >= ALL(booking_array.starts_at_list) 
-					AND $5 >= ALL(booking_array.ends_at_list))
-			OR
-			($4 <= ALL(booking_array.starts_at_list) 
-					AND $5 <= ALL(booking_array.ends_at_list))
-				THEN TRUE 
-				ELSE FALSE 
-			END AS date_flag
-		FROM booking_array
-			)
-		-- сортировка по дате
-
-		AND ST_Distance(
-					ST_SetSRID(ST_MakePoint($6::float8, $7::float8), 4326)::geography,
-					ST_SetSRID(ST_MakePoint(t2.Position[0], t2.Position[1]), 4326)::geography
-				) < $8
-		-- сортировка по радиусу
-		
-		AND COALESCE(t4.rating = $9, TRUE)
-		-- сортировка по рейтингу
-		ORDER BY
-			t2.Id;
+				WITH booking_array AS (
+					SELECT 
+						COALESCE(array_agg(bookings.starts_at::date), ARRAY[NULL::date]) AS starts_at_list,
+						COALESCE(array_agg(bookings.ends_at::date), ARRAY[NULL::date]) AS ends_at_list,
+						COALESCE(array_agg(bookings.id), ARRAY[NULL::int]) AS bookings_id_list,
+						COALESCE(bookings.ads_id, 0) AS ads_id_list
+					FROM 
+						orders.orders AS orders
+					LEFT JOIN 
+						orders.bookings AS bookings
+						ON orders.id = bookings.order_id AND bookings.ads_id = t2.id
+					GROUP BY 
+						bookings.ads_id
+					UNION ALL
+					SELECT 
+						ARRAY[NULL::date],
+						ARRAY[NULL::date],
+						ARRAY[NULL::int],
+						0
+					WHERE NOT EXISTS (SELECT 1 FROM orders.orders)
+				)
+				SELECT
+					CASE
+						WHEN NOT EXISTS (SELECT 1 FROM orders.orders) THEN TRUE
+						WHEN booking_array.ads_id_list IS NULL OR booking_array.ads_id_list = 0 THEN TRUE
+						WHEN cardinality(array_remove(booking_array.starts_at_list, NULL)) = 0 THEN TRUE
+						WHEN ($4::date >= ALL(booking_array.starts_at_list) 
+							AND $5::date >= ALL(booking_array.ends_at_list))
+						OR ($4::date <= ALL(booking_array.starts_at_list) 
+							AND $5::date <= ALL(booking_array.ends_at_list))
+						THEN TRUE 
+						ELSE FALSE 
+					END AS date_flag
+				FROM 
+					booking_array
+							)
+							AND ST_Distance(
+									ST_SetSRID(ST_MakePoint($6::float8, $7::float8), 4326)::geography,
+									ST_SetSRID(ST_MakePoint(t2.Position[0], t2.Position[1]), 4326)::geography
+								) < $8
+						-- сортировка по радиусу
+						
+						AND (COALESCE(t4.rating = $9, TRUE) OR COALESCE($9 = 0, TRUE))
+						-- сортировка по рейтингу
+						ORDER BY
+							t2.Id;
 		`,
 
 		category,
@@ -555,8 +603,10 @@ func (repo *MyRepository) SortProductListDailyRateSQL(ctx context.Context, rw ht
 		position[1],
 		distance,
 		rating,
+		location+"%",
+		location,
 	)
-	errorr(err)
+	fmt.Println(err)
 
 	for request.Next() {
 		p := Product{}
@@ -565,12 +615,16 @@ func (repo *MyRepository) SortProductListDailyRateSQL(ctx context.Context, rw ht
 			&p.Ads_path,
 			&p.Daily_rate,
 			&p.Title,
+			&p.Description,
 			&p.Category_id,
 			&p.Name,
 			&p.Surname_or_ind_num,
 			&p.Owner_id,
 			&p.Rating,
 			&p.Avatar_path,
+			&p.Review_count,
+			&p.Duration,
+			&p.Location,
 		)
 		if err != nil {
 			fmt.Println(err)
@@ -581,27 +635,51 @@ func (repo *MyRepository) SortProductListDailyRateSQL(ctx context.Context, rw ht
 	}
 
 	for i := 0; i < len(products); i++ { //пока что у нас три объявления
-		if products[i].Ads_path != nil {
-			products[i].Ads_photo = ServeSpecificMediaBase64(rw, r, ConvertToString(products[i].Ads_path))
-		}
-		products[i].Ads_path = nil
+		products[i].Ads_photo = ServeSpecificMediaBase64(rw, r, products[i].Ads_path)
 
-		if products[i].Avatar_path != nil {
-			products[i].Avatar_photo = ServeSpecificMediaBase64(rw, r, ConvertToString(products[i].Avatar_path))
-		}
-		products[i].Avatar_path = nil
+		products[i].Avatar_photo = ServeSpecificMediaBase64(rw, r, products[i].Avatar_path)
+
 	}
 
 	type Response struct {
 		Status  string    `json:"status"`
+		Lenght  int       `json:"Lenght"`
 		Data    []Product `json:"data,omitempty"`
 		Message string    `json:"message"`
+	}
+
+	if len(products) < list*size {
+
+		if len(products) < (list*size)-size {
+			response := Response{
+				Status:  "fatal",
+				Message: "Диапозон выходит за рамки ",
+			}
+
+			rw.WriteHeader(http.StatusOK)
+			json.NewEncoder(rw).Encode(response)
+
+			return err
+		}
+
+		response := Response{
+			Status:  "success",
+			Lenght:  len(products),
+			Data:    products[(list*size)-size:],
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
 	}
 
 	if err == nil && request != nil && len(products) != 0 {
 		response := Response{
 			Status:  "success",
-			Data:    products,
+			Lenght:  len(products),
+			Data:    products[(list*size)-size : (list * size)],
 			Message: "Показано",
 		}
 
@@ -622,22 +700,24 @@ func (repo *MyRepository) SortProductListDailyRateSQL(ctx context.Context, rw ht
 	return err
 }
 
-func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, category []int, lowNum, higNum int, lowDate, higDate time.Time, position []float64, distance, rating int) (err error) {
+func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, list int, size int, category []int, lowNum, higNum int, lowDate, higDate time.Time, position []float64, distance, rating int, location string) (err error) {
 	type Product struct {
 		Id *int
 
-		Ads_path  *string
+		Ads_path  string
 		Ads_photo string
 
 		Hourly_rate        *int
 		Title              *string
+		Description        *string
 		Category_id        *int
 		Name               *string
 		Surname_or_ind_num *string
 		Owner_id           *int
 		Rating             *float32
+		Location           string
 
-		Avatar_path  *string
+		Avatar_path  string
 		Avatar_photo string
 
 		Review_count int
@@ -645,28 +725,32 @@ func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw h
 	}
 	products := []Product{}
 
-	errorr(err)
-
 	request, err := rep.Query(
 		ctx,
 		`
 		WITH duration AS (
-			SELECT 
+			SELECT
 				ads.id,
 				ads.owner_id,
 				ARRAY[
-					MAX(bookings.starts_at),
-					MAX(bookings.ends_at)
+					COALESCE(MAX(bookings.starts_at), '1900-01-01'),
+					COALESCE(MAX(bookings.ends_at), '1900-01-01')
 				] AS date_range
-			FROM ads.ads, orders.bookings
-			WHERE bookings.ads_id = ads.id
-			GROUP BY ads.id, ads.owner_id
+			FROM 
+				ads.ads
+			LEFT JOIN 
+				orders.bookings
+			ON 
+				bookings.ads_id = ads.id
+			GROUP BY 
+				ads.id, ads.owner_id
 		)
 		SELECT DISTINCT ON (t2.Id)
 			t2.Id,
-			t1.File_path::TEXT,
+			COALESCE(t1.File_path::TEXT, '/home/'),
 			t2.Hourly_rate,
 			t2.Title::TEXT,
+			t2.Description,
 			t2.Category_id,
 			COALESCE(t3.name::TEXT, t5.name_of_company::TEXT) AS Name,
 			COALESCE(t3.surname::TEXT, t5.ind_num_taxp::TEXT) AS Surname_or_ind_num,
@@ -676,7 +760,8 @@ func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw h
 			(Review_count(ARRAY[t2.id]::INT[]))[1],
 			COALESCE((Duration(
 				(SELECT d.date_range::date[] FROM duration d WHERE d.id = t2.id)
-			))[1], 'Нет точной информации')
+			))[1], 'Нет точной информации'),
+			t2.Location
 		FROM
 			ads.ads t2
 		LEFT JOIN
@@ -689,46 +774,55 @@ func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw h
 		INNER JOIN
 			users.users t4 ON t2.owner_id = t4.id
 		WHERE
+			t2.status = true AND
+			(t2.Location ILIKE $10 OR t2.Location ILIKE '%' || $11 || '%' OR $11 ILIKE '%' || t2.Location || '%') AND
 			(cardinality($1::INT[]) = 0 OR t2.category_id = ANY($1::INT[]))
 			AND $2 <= t2.Hourly_rate AND t2.Hourly_rate <= $3
 			AND EXISTS (
 				WITH booking_array AS (
-				SELECT 
-					COALESCE(array_agg(bookings.starts_at::date), ARRAY[NULL::date]) AS starts_at_list,
-					COALESCE(array_agg(bookings.ends_at::date), ARRAY[NULL::date]) AS ends_at_list,
-					COALESCE(array_agg(bookings.id), ARRAY[NULL::int]) AS bookings_id_list,
-					COALESCE(bookings.ads_id, 0) AS ads_id_list
-				FROM 
-					orders.bookings AS bookings
-				RIGHT JOIN
-					orders.orders AS orders
-					ON orders.id = bookings.order_id AND bookings.ads_id = t2.Id
-				GROUP BY 
-					bookings.ads_id
+					SELECT 
+						COALESCE(array_agg(bookings.starts_at::date), ARRAY[NULL::date]) AS starts_at_list,
+						COALESCE(array_agg(bookings.ends_at::date), ARRAY[NULL::date]) AS ends_at_list,
+						COALESCE(array_agg(bookings.id), ARRAY[NULL::int]) AS bookings_id_list,
+						COALESCE(bookings.ads_id, 0) AS ads_id_list
+					FROM 
+						orders.orders AS orders
+					LEFT JOIN 
+						orders.bookings AS bookings
+						ON orders.id = bookings.order_id AND bookings.ads_id = t2.id
+					GROUP BY 
+						bookings.ads_id
+					UNION ALL
+					SELECT 
+						ARRAY[NULL::date],
+						ARRAY[NULL::date],
+						ARRAY[NULL::int],
+						0
+					WHERE NOT EXISTS (SELECT 1 FROM orders.orders)
 				)
-				SELECT
+			SELECT
 				CASE
-					WHEN booking_array.ads_id_list IS NULL THEN TRUE
-					WHEN cardinality(array_remove(booking_array.starts_at_list, NULL)) = 0 THEN TRUE -- Проверка, содержит ли массив только NULL
+					WHEN NOT EXISTS (SELECT 1 FROM orders.orders) THEN TRUE
+					WHEN booking_array.ads_id_list IS NULL OR booking_array.ads_id_list = 0 THEN TRUE
+					WHEN cardinality(array_remove(booking_array.starts_at_list, NULL)) = 0 THEN TRUE
 					WHEN ($4::date >= ALL(booking_array.starts_at_list) 
-					AND $5::date >= ALL(booking_array.ends_at_list))
+						AND $5::date >= ALL(booking_array.ends_at_list))
 					OR ($4::date <= ALL(booking_array.starts_at_list) 
-					AND $5::date <= ALL(booking_array.ends_at_list))
+						AND $5::date <= ALL(booking_array.ends_at_list))
 					THEN TRUE 
 					ELSE FALSE 
 				END AS date_flag
-				FROM booking_array
-			)
-			AND ST_Distance(
-					ST_SetSRID(ST_MakePoint($6::float8, $7::float8), 4326)::geography,
-					ST_SetSRID(ST_MakePoint(t2.Position[0], t2.Position[1]), 4326)::geography
-				) < $8
-		-- сортировка по радиусу
-		
-		AND (COALESCE(t4.rating = $9, TRUE) OR COALESCE($9 = 0, TRUE))
-		-- сортировка по рейтингу
-		ORDER BY
-			t2.Id;
+			FROM booking_array)
+					AND ST_Distance(
+							ST_SetSRID(ST_MakePoint($6::float8, $7::float8), 4326)::geography,
+							ST_SetSRID(ST_MakePoint(t2.Position[0], t2.Position[1]), 4326)::geography
+						) < $8
+				-- сортировка по радиусу
+				
+				AND (COALESCE(t4.rating = $9, TRUE) OR COALESCE($9 = 0, TRUE))
+				-- сортировка по рейтингу
+				ORDER BY
+					t2.Id;
 		`,
 
 		category,
@@ -740,8 +834,9 @@ func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw h
 		position[1],
 		distance,
 		rating,
+		location+"%",
+		location,
 	)
-	errorr(err)
 
 	for request.Next() {
 		p := Product{}
@@ -750,6 +845,7 @@ func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw h
 			&p.Ads_path,
 			&p.Hourly_rate,
 			&p.Title,
+			&p.Description,
 			&p.Category_id,
 			&p.Name,
 			&p.Surname_or_ind_num,
@@ -758,6 +854,7 @@ func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw h
 			&p.Avatar_path,
 			&p.Review_count,
 			&p.Duration,
+			&p.Location,
 		)
 		if err != nil {
 			fmt.Println(err)
@@ -768,27 +865,51 @@ func (repo *MyRepository) SortProductListHourlyRateSQL(ctx context.Context, rw h
 	}
 
 	for i := 0; i < len(products); i++ { //пока что у нас три объявления
-		if products[i].Ads_path != nil {
-			products[i].Ads_photo = ServeSpecificMediaBase64(rw, r, ConvertToString(products[i].Ads_path))
-		}
-		products[i].Ads_path = nil
+		products[i].Ads_photo = ServeSpecificMediaBase64(rw, r, products[i].Ads_path)
 
-		if products[i].Avatar_path != nil {
-			products[i].Avatar_photo = ServeSpecificMediaBase64(rw, r, ConvertToString(products[i].Avatar_path))
-		}
-		products[i].Avatar_path = nil
+		products[i].Avatar_photo = ServeSpecificMediaBase64(rw, r, products[i].Avatar_path)
+
 	}
 
 	type Response struct {
 		Status  string    `json:"status"`
+		Lenght  int       `json:"Lenght"`
 		Data    []Product `json:"data,omitempty"`
 		Message string    `json:"message"`
+	}
+
+	if len(products) < list*size {
+
+		if len(products) < (list*size)-size {
+			response := Response{
+				Status:  "fatal",
+				Message: "Диапозон выходит за рамки ",
+			}
+
+			rw.WriteHeader(http.StatusOK)
+			json.NewEncoder(rw).Encode(response)
+
+			return err
+		}
+
+		response := Response{
+			Status:  "success",
+			Lenght:  len(products),
+			Data:    products[(list*size)-size:],
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
 	}
 
 	if err == nil && request != nil && len(products) != 0 {
 		response := Response{
 			Status:  "success",
-			Data:    products,
+			Lenght:  len(products),
+			Data:    products[(list*size)-size : (list * size)],
 			Message: "Показано",
 		}
 
@@ -821,19 +942,21 @@ func (repo *MyRepository) SignupAdsSQL(
 	category_id int,
 	PositionX,
 	PositionY float64,
+	Location string,
 	updated_at time.Time,
 	images []string,
 	pwd_mass []string,
 	pwd string) (err error) {
+
 	request, err := rep.Query(ctx, `
 			WITH i AS (
-				INSERT INTO Ads.ads (title, description, hourly_rate, daily_rate, owner_id, category_id, position, updated_at) 
-				VALUES ($1, $2, $3, $4, $5, $6, POINT($7, $8), $9) 
+				INSERT INTO Ads.ads (title, description, hourly_rate, daily_rate, owner_id, category_id, position, updated_at, location) 
+				VALUES ($1, $2, $3, $4, $5, $6, POINT($7, $8), $9, $10) 
 				RETURNING id
 			),
 			p AS (
-				INSERT INTO Ads.Ad_photos (ad_id, file_path, removed_at, status)
-				SELECT i.id, $10, $11, $12
+				INSERT INTO Ads.Ad_photos (ad_id, file_path, status)
+				SELECT i.id, UNNEST($11::text[]), $12
 				FROM i
 				RETURNING ad_id
 			)
@@ -848,9 +971,9 @@ func (repo *MyRepository) SignupAdsSQL(
 		PositionX,
 		PositionY,
 		updated_at,
+		Location,
 
-		pwd,
-		time.Now(),
+		pwd_mass,
 		false,
 	)
 	errorr(err)
@@ -891,7 +1014,6 @@ func (repo *MyRepository) SignupAdsSQL(
 			Message: "Объявление не зарегистирровано",
 		}
 
-		// rw.WriteHeader(http.StatusOK)
 		json.NewEncoder(rw).Encode(response)
 
 		return err
@@ -1570,7 +1692,7 @@ func (repo *MyRepository) SearchForTechSQL(ctx context.Context, title string, rw
 	products := []Int{}
 
 	request, err := rep.Query(ctx, `
-			SELECT ads.title, ads.id FROM ads.ads WHERE ads.title ILIKE '%' || $1 || '%';
+			SELECT ads.title, ads.id FROM ads.ads WHERE ads.title ILIKE '%' || $1 || '%' AND status != false;
 		`,
 		title,
 	)
@@ -1622,13 +1744,15 @@ func (repo *MyRepository) SearchForTechSQL(ctx context.Context, title string, rw
 	}
 }
 
-func (repo *MyRepository) SortProductListCategoriezSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, category []int) (err error) {
+func (repo *MyRepository) SortProductListCategoriezSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, category []int) (err error) {
 	type Product struct {
 		Id          *int
-		File_path   *string
+		File_path   string
+		Photo       string
 		Hourly_rate *int
 		Daily_rate  *int
 		Title       *string
+		Description *string
 		Category_id *int
 		Name        interface{}
 		Owner_id    *int
@@ -1647,10 +1771,11 @@ func (repo *MyRepository) SortProductListCategoriezSQL(ctx context.Context, rw h
 		`
 		SELECT
 			t2.Id,
-			MIN(t1.File_path) AS File_path,  -- или используйте другую агрегатную функцию
+			MIN(COALESCE(t1.File_path, '/home/')) AS File_path,
 			MIN(t2.Hourly_rate) AS Hourly_rate,
 			MIN(t2.Daily_rate) AS Daily_rate,
 			MIN(t2.Title) AS Title,
+			MIN(t2.description) AS description,
 			MIN(t2.Category_id) AS Category_id,
 			COALESCE(MIN(t3.Name), MIN(CAST(comp_user.ind_num_taxp AS text))) AS Name,
 			MIN(t2.Owner_id) AS Owner_id,
@@ -1675,6 +1800,7 @@ func (repo *MyRepository) SortProductListCategoriezSQL(ctx context.Context, rw h
 
 		category,
 	) //категория передается как массив
+	fmt.Println(err)
 
 	if err != nil {
 		err = fmt.Errorf("failed to exec data: %w", err)
@@ -1690,6 +1816,7 @@ func (repo *MyRepository) SortProductListCategoriezSQL(ctx context.Context, rw h
 			&p.Hourly_rate,
 			&p.Daily_rate,
 			&p.Title,
+			&p.Description,
 			&p.Category_id,
 			&p.Name,
 			&p.Owner_id,
@@ -1699,7 +1826,10 @@ func (repo *MyRepository) SortProductListCategoriezSQL(ctx context.Context, rw h
 			fmt.Println(err)
 
 			continue
+
 		}
+		p.Photo = ServeSpecificMediaBase64(rw, r, p.File_path)
+
 		products = append(products, p)
 	}
 
@@ -1733,40 +1863,138 @@ func (repo *MyRepository) SortProductListCategoriezSQL(ctx context.Context, rw h
 	return err
 }
 
-func (repo *MyRepository) SigReviewSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, user_id, order_id, rating int, comment string, state int) (err error) {
+func (repo *MyRepository) SigDisputInChatSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, chat_id, user_id int) (err error) {
 	request, err := rep.Query(
 		ctx,
 		`
-		WITH booking AS (
-			SELECT booking_id FROM orders.orders WHERE id = $1
+		WITH disp AS (
+			SELECT id, winner_id 
+			FROM orders.disputes 
+			WHERE chat_id = $1
 		),
-		transact AS (
-			SELECT transaction_id FROM orders.bookings WHERE id = (SELECT booking_id FROM booking)
+		i AS(
+			INSERT INTO orders.disputes (chat_id)
+			SELECT $1
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM disp
+				WHERE winner_id IS NULL
+			)
+			RETURNING id
 		),
-		wallet AS (
-			SELECT wallet_id FROM finance.transactions WHERE id = (SELECT transaction_id FROM transact)
-		),
-		users AS (
-			SELECT user_id FROM finance.wallets WHERE id = (SELECT wallet_id FROM wallet)
+		j AS (
+			UPDATE chat.chats 
+			SET have_disput = true
+			WHERE id = $1 AND (user_1_id = $2 OR user_2_id = $2) AND have_disput != true RETURNING id, have_disput
 		)
-		INSERT INTO ads.reviews(order_id, rating, comment, state)
-		SELECT $1, $2, $3, $5
-		WHERE $4 = (SELECT user_id FROM users) AND $5 >= 1 AND $5 <= 4
-		RETURNING id;
+		SELECT id FROM i;
 		`,
 
-		order_id,
-		rating,
-		comment,
+		chat_id,
 		user_id,
-		state)
+	)
 
 	errorr(err)
+
+	var id_chat int
+	for request.Next() {
+		err := request.Scan(
+			&id_chat,
+		)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    int    `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	if err != nil || id_chat <= 0 {
+		response := Response{
+			Status:  "fatal",
+			Data:    0,
+			Message: "Ошибка, спор по этому чату уже идёт",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+		return err
+	}
+
+	response := Response{
+		Status:  "success",
+		Data:    id_chat,
+		Message: "Спор добавлен",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+	return
+}
+
+func (repo *MyRepository) SigReviewSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, rdb *redis.Client, сonnection map[int]*websocket.Conn, user_id, ads_id, rating int, comment string, state int) (err error) {
+	request, err := rep.Query(
+		ctx,
+		`
+		WITH wallet AS (
+			SELECT id, user_id FROM finance.wallets WHERE user_id = $1
+		),
+		transactionn AS (
+			SELECT id FROM finance.transactions WHERE wallet_id = (SELECT id FROM wallet)
+		),
+		booking AS (
+			SELECT order_id FROM orders.bookings 
+			WHERE ads_id = $2 AND 
+				transaction_id IN (SELECT id FROM transactionn)
+			LIMIT 1
+		),
+		reviews AS (
+			SELECT reviews.id
+			FROM ads.reviews
+			JOIN
+				orders.bookings
+				ON bookings.ads_id = $2
+			JOIN
+				finance.transactions
+				ON transactions.id = bookings.transaction_id
+			JOIN
+				finance.wallets
+				ON wallets.id = transactions.wallet_id AND user_id = $1
+			WHERE reviews.order_id = bookings.order_id
+		),
+		buddy AS (
+			SELECT owner_id
+			FROM ads.ads
+			WHERE ads.id = $2
+		)
+		INSERT INTO ads.reviews(order_id, rating, comment, state)
+		SELECT (SELECT order_id FROM booking), $3, $4, $5
+		WHERE $1 = (SELECT user_id FROM wallet) AND $5 >= 1 AND $5 <= 4 AND (SELECT id FROM reviews) IS NULL
+		RETURNING id, (SELECT order_id FROM booking), (SELECT owner_id FROM buddy), reviews.created_at;
+		`,
+
+		user_id,
+		ads_id,
+		rating,
+		comment,
+		state)
+	errorr(err)
+
+	var order_id int
+	var buddy_id int
+	var created_at time.Time
 
 	var rev_id int
 	for request.Next() {
 		err := request.Scan(
 			&rev_id,
+			&order_id,
+			&buddy_id,
+			&created_at,
 		)
 		if err != nil {
 			fmt.Println(err)
@@ -1789,17 +2017,53 @@ func (repo *MyRepository) SigReviewSQL(ctx context.Context, rw http.ResponseWrit
 		rw.WriteHeader(http.StatusOK)
 		json.NewEncoder(rw).Encode(response)
 		return err
-	} else {
-		response := Response{
-			Status:  "success",
-			Data:    rev_id,
-			Message: "Отзыв добавлен",
-		}
-
-		rw.WriteHeader(http.StatusOK)
-		json.NewEncoder(rw).Encode(response)
-		return
 	}
+	response := Response{
+		Status:  "success",
+		Data:    rev_id,
+		Message: "Отзыв добавлен",
+	}
+
+	//достаём аву и имя
+	request, err = rep.Query(
+		ctx,
+		`
+		SELECT
+			users.avatar_path,
+			COALESCE(individual_user.name, company_user.name_of_company),
+			users.user_role
+		FROM users.users
+		LEFT JOIN users.individual_user ON individual_user.user_id = users.id
+		LEFT JOIN users.company_user ON company_user.user_id = users.id
+		WHERE users.id = $1
+		`,
+
+		user_id,
+	)
+	errorr(err)
+
+	var user_role int
+	var avatar_path string
+	var name string
+
+	for request.Next() {
+		err := request.Scan(
+			&avatar_path,
+			&name,
+			&user_role,
+		)
+		if err != nil {
+			fmt.Println(err)
+
+			continue
+		}
+	}
+
+	Reviews_Notification(ctx, buddy_id, сonnection[buddy_id], "reg_review", rev_id, "Вам оставили отзыв", created_at, user_id, user_role, ServeSpecificMediaBase64(rw, r, avatar_path), name, rdb)
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+	return
 }
 
 func (repo *MyRepository) UpdReviewSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, reviewer_id, review_id, rating int, comment string) (err error) {
@@ -1922,142 +2186,204 @@ type DisputeChat struct {
 	Comment   string `json:"Comment"`
 }
 
-func (repo *MyRepository) MediatorStartWorkingSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, chat_id int, mediator_id int) (err error) {
-	// type User_1 struct {
-	// 	Text string
-	// 	Date time.Time
-	// }
-	// Userr_1 := []User_1{}
+func (repo *MyRepository) MediatorEnterInChatSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, id_chat, user_id int) (err error) {
+	type Product_user struct {
+		Message_id int
+		User_id    int
+		User_role  int
+		Name       string
+		Text       string
+		Media      []string
+		Date       time.Time
+		Media_pwd  []string
+	}
+	Products_user_mass := []Product_user{}
 
-	// type User_2 struct {
-	// 	Text string
-	// 	Date time.Time
-	// }
-	// Userr_2 := []User_2{}
+	type Response struct {
+		Status       string         `json:"status"`
+		Ads_id       int            `json:"ads_id"`
+		Disput_state bool           `json:"disput_state"`
+		Mediator_id  int            `json:"moderator_id"`
+		Slave_id     int            `json:"slave_id"`
+		Owner_id     int            `json:"owner_id"`
+		Global_rate  int            `json:"global_rate"`
+		Data         []Product_user `json:"data,omitempty"`
+		Message      string         `json:"message"`
+	}
 
-	// type Product struct {
-	// 	Mediator_id     int
-	// 	Id_1            int
-	// 	Products_user_1 []User_1
-	// 	Id_2            int
-	// 	Products_user_2 []User_2
-	// }
+	var chat_id_flag int
 
-	// request, err := rep.Query(
-	// 	ctx,
-	// 	`SELECT user_1_id FROM chat.chats WHERE id = $1;`, chat_id)
-
-	// errorr(err)
-
-	// var User_1_id int
-	// for request.Next() {
-	// 	err := request.Scan(
-	// 		&User_1_id,
-	// 	)
-	// 	if err != nil {
-	// 		fmt.Println(err)
-	// 		continue
-	// 	}
-	// }
-
-	// request, err = rep.Query(
-	// 	ctx,
-	// 	`SELECT user_2_id FROM chat.chats WHERE id = $1;`, chat_id)
-
-	// errorr(err)
-
-	// var User_2_id int
-	// for request.Next() {
-	// 	err := request.Scan(
-	// 		&User_2_id,
-	// 	)
-	// 	if err != nil {
-	// 		fmt.Println(err)
-	// 		continue
-	// 	}
-	// }
-
-	// request, err = rep.Query(
-	// 	ctx,
-	// 	`SELECT text, sent_at FROM chat.messages WHERE chat_id = $1 AND sender_id = $2;`, chat_id, User_1_id)
-
-	// errorr(err)
-
-	// for request.Next() {
-	// 	p := User_1{}
-	// 	err := request.Scan(
-	// 		&p.Text,
-	// 		&p.Date,
-	// 	)
-	// 	if err != nil {
-	// 		fmt.Println(err)
-
-	// 		continue
-	// 	}
-	// 	Userr_1 = append(Userr_1, User_1{Text: p.Text, Date: p.Date})
-	// }
-
-	// request, err = rep.Query(
-	// 	ctx,
-	// 	`SELECT text, sent_at FROM chat.messages WHERE chat_id = $1 AND sender_id = $2;`, chat_id, User_2_id)
-
-	// errorr(err)
-
-	// for request.Next() {
-	// 	p := User_2{}
-	// 	err := request.Scan(
-	// 		&p.Text,
-	// 		&p.Date,
-	// 	)
-	// 	if err != nil {
-	// 		fmt.Println(err)
-
-	// 		continue
-	// 	}
-	// 	Userr_2 = append(Userr_2, User_2{Text: p.Text, Date: p.Date})
-	// }
-
-	request, err := rep.Query( //это запрос на вывод наших сообщений
+	request_upd_chat, erro := rep.Query( //это запрос на вывод сообщений нашего кента
 		ctx,
 		`
-		UPDATE chat.chats SET mediator_id = $1 
-		WHERE id = $2
-		RETURNING mediator_id;`,
+		UPDATE chat.chats
+		SET mediator_id = $1
+		WHERE id = $2 AND (mediator_id IS NULL OR mediator_id = $1)
+		RETURNING id;
+		`,
 
-		mediator_id,
-		chat_id,
+		user_id,
+		id_chat,
 	)
-	errorr(err)
+	errorr(erro)
 
-	var Id_mediator int
-
-	for request.Next() {
-		err := request.Scan(
-			&Id_mediator,
+	for request_upd_chat.Next() {
+		err := request_upd_chat.Scan(
+			&chat_id_flag,
 		)
+
 		if err != nil {
 			fmt.Println(err)
+
 			continue
 		}
 	}
 
-	type Response struct {
-		Status  string `json:"status"`
-		Data    int    `json:"data,omitempty"`
-		Message string `json:"message"`
-	}
-
-	if err == nil && Id_mediator != 0 {
+	if chat_id_flag == 0 {
 		response := Response{
-			Status:  "success",
-			Data:    Id_mediator,
-			Message: "Показано",
+			Status:  "fatal",
+			Message: "Не показано",
 		}
 
 		rw.WriteHeader(http.StatusOK)
 		json.NewEncoder(rw).Encode(response)
 
 		return err
+	}
+
+	var Message_idd int
+	var User_iddd int
+	var User_rolee int
+	var Namee string
+	var Text string
+	var Date time.Time
+	var Media_pwd []string
+
+	request_2, err := rep.Query( //это запрос на вывод сообщений нашего кента
+		ctx,
+		`
+		WITH i AS (
+			SELECT id, text, sent_at, sender_id
+			FROM chat.messages 
+			WHERE chat_id = $1
+		),
+		j AS (
+			SELECT message_id, path_to_file 
+			FROM chat.attachments 
+			WHERE message_id IN (SELECT id FROM i)
+		),
+		company_user AS (
+			SELECT user_id, name_of_company 
+			FROM users.company_user 
+			WHERE user_id = (SELECT sender_id FROM i LIMIT 1)
+		),
+		individual_user AS (
+			SELECT user_id, name 
+			FROM users.individual_user 
+			WHERE user_id = (SELECT sender_id FROM i LIMIT 1)
+		),
+		chat_info AS (
+			SELECT user_1_id, user_2_id, ad_id, have_disput, mediator_id FROM  chat.chats WHERE chats.id = $1
+		),
+		ownerr AS (
+			SELECT owner_id FROM ads.ads WHERE id = (SELECT ad_id FROM chat_info)
+		),
+		global_rate_info AS (
+			WITH i AS (
+				SELECT ad_id FROM chat.chats WHERE chats.id = $1
+			)
+			SELECT global_rate FROM finance.bidding WHERE bidding.ads_id = (SELECT ad_id FROM i) AND renter_id = $2 AND end_at > NOW()
+			ORDER BY id desc
+			LIMIT 1
+		)
+		SELECT
+			(SELECT ad_id FROM chat_info) AS ads_id,
+			(SELECT have_disput FROM chat_info) AS disput_state,
+			COALESCE((SELECT mediator_id FROM chat_info), 0) AS mediator_id,
+			COALESCE((SELECT user_1_id FROM chat_info WHERE user_1_id != (SELECT owner_id FROM ownerr)),
+				(SELECT user_2_id FROM chat_info WHERE user_2_id != (SELECT owner_id FROM ownerr))) AS slsve_id,
+			(SELECT owner_id FROM ownerr),
+			COALESCE((SELECT global_rate FROM global_rate_info), 0),
+
+			i.id AS message_id,
+			i.sender_id AS user_id,
+			COALESCE(individual_user.name, 'company_user.name_of_company') AS name,
+			i.text,
+			i.sent_at,
+			j.path_to_file,
+			users.user_role
+		FROM i
+		JOIN users.users ON users.id = i.sender_id
+		LEFT JOIN j ON j.message_id = i.id
+		LEFT JOIN company_user ON company_user.user_id = i.sender_id
+		LEFT JOIN individual_user ON individual_user.user_id = i.sender_id
+		ORDER BY i.id desc;
+		`,
+
+		id_chat,
+		user_id,
+	)
+	errorr(err)
+
+	var ads_id int
+	var disput_state bool
+	var mediator_id int
+	var slave_id int
+	var owner_id int
+	var global_rate int
+
+	for request_2.Next() {
+		err := request_2.Scan(
+			&ads_id,
+			&disput_state,
+			&mediator_id,
+			&slave_id,
+			&owner_id,
+			&global_rate,
+
+			&Message_idd,
+			&User_iddd,
+			&Namee,
+			&Text,
+			&Date,
+			&Media_pwd,
+			&User_rolee,
+		)
+		if err != nil {
+			fmt.Println(err)
+
+			continue
+		}
+
+		Products_user_mass = append(Products_user_mass, Product_user{Message_id: Message_idd, User_id: User_iddd, User_role: User_rolee, Name: Namee, Text: Text, Date: Date, Media_pwd: Media_pwd})
+	}
+
+	if err == nil && (Products_user_mass != nil) {
+		for i := 0; i < len(Products_user_mass); i++ {
+			for j := 0; j < len(Products_user_mass[i].Media_pwd); j++ {
+				media, err := DownloadFile(Products_user_mass[i].Media_pwd[j])
+				Products_user_mass[i].Media_pwd[j] = media
+
+				errorr(err)
+			}
+		}
+
+		response := Response{
+			Status:       "success",
+			Ads_id:       ads_id,
+			Disput_state: disput_state,
+			Mediator_id:  mediator_id,
+			Slave_id:     slave_id,
+			Owner_id:     owner_id,
+			Global_rate:  global_rate,
+			Data:         Products_user_mass,
+			Message:      "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
 	}
 
 	response := Response{
@@ -2071,122 +2397,59 @@ func (repo *MyRepository) MediatorStartWorkingSQL(ctx context.Context, rw http.R
 	return err
 }
 
-func (repo *MyRepository) MediatorEnterInChatSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, chat_id int, mediator_id int) (err error) {
-	type User_1 struct {
-		Text string
-		Date time.Time
-	}
-	Userr_1 := []User_1{}
-
-	type User_2 struct {
-		Text string
-		Date time.Time
-	}
-	Userr_2 := []User_2{}
-
-	type Product struct {
-		Id_1            int
-		Products_user_1 []User_1
-		Id_2            int
-		Products_user_2 []User_2
-	}
-
-	request, err := rep.Query(
+func (repo *MyRepository) RebookListSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, ads_id, user_id int) (err error) {
+	request, err := rep.Query( //это запрос на вывод наших сообщений
 		ctx,
-		`SELECT user_1_id FROM chat.chats WHERE id = $1;`, chat_id)
+		`
+		WITH wallet AS (
+			SELECT id FROM finance.wallets WHERE user_id = $1
+		),
+		transact AS (
+			SELECT id FROM finance.transactions WHERE wallet_id = (SELECT id FROM wallet)
+		),
+		owner AS (
+			SELECT order_id FROM orders.bookings WHERE ads_id = $2 AND transaction_id IN (SELECT id FROM transact) ORDER BY id DESC LIMIT 1
+		)
+		SELECT id FROM orders.bookings WHERE order_id = (SELECT order_id FROM owner) AND typee = 2
+		`,
 
+		user_id,
+		ads_id,
+	)
 	errorr(err)
 
-	var User_1_id int
+	var bookIdList []int
+	var bookId int
+
 	for request.Next() {
 		err := request.Scan(
-			&User_1_id,
+			&bookId,
 		)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
-	}
 
-	request, err = rep.Query(
-		ctx,
-		`SELECT user_2_id FROM chat.chats WHERE id = $1;`, chat_id)
-
-	errorr(err)
-
-	var User_2_id int
-	for request.Next() {
-		err := request.Scan(
-			&User_2_id,
-		)
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-	}
-
-	request, err = rep.Query(
-		ctx,
-		`SELECT text, sent_at FROM chat.messages WHERE chat_id = $1 AND sender_id = $2;`, chat_id, User_1_id)
-
-	errorr(err)
-
-	for request.Next() {
-		p := User_1{}
-		err := request.Scan(
-			&p.Text,
-			&p.Date,
-		)
-		if err != nil {
-			fmt.Println(err)
-
-			continue
-		}
-		Userr_1 = append(Userr_1, User_1{Text: p.Text, Date: p.Date})
-	}
-
-	request, err = rep.Query(
-		ctx,
-		`SELECT text, sent_at FROM chat.messages WHERE chat_id = $1 AND sender_id = $2;`, chat_id, User_2_id)
-
-	errorr(err)
-
-	for request.Next() {
-		p := User_2{}
-		err := request.Scan(
-			&p.Text,
-			&p.Date,
-		)
-		if err != nil {
-			fmt.Println(err)
-
-			continue
-		}
-		Userr_2 = append(Userr_2, User_2{Text: p.Text, Date: p.Date})
+		bookIdList = append(bookIdList, bookId)
 	}
 
 	type Response struct {
-		Status  string  `json:"status"`
-		Data    Product `json:"data,omitempty"`
-		Message string  `json:"message"`
+		Status  string `json:"status"`
+		Data    []int  `json:"data,omitempty"`
+		Message string `json:"message"`
 	}
 
-	if err == nil && (len(Userr_1) != 0 || len(Userr_2) != 0) {
+	if err == nil && len(bookIdList) != 0 {
 		response := Response{
-			Status: "success",
-			Data: Product{
-				Id_1:            User_1_id,
-				Products_user_1: Userr_1,
-				Id_2:            User_2_id,
-				Products_user_2: Userr_2,
-			},
+			Status:  "success",
+			Data:    bookIdList,
 			Message: "Показано",
 		}
 
 		rw.WriteHeader(http.StatusOK)
 		json.NewEncoder(rw).Encode(response)
 
-		return err
+		return
 	}
 
 	response := Response{
@@ -2254,19 +2517,272 @@ func (repo *MyRepository) MediatorFinishJobInChatSQL(ctx context.Context, rw htt
 	return err
 }
 
-func (repo *MyRepository) SigFavAdsSQL(ctx context.Context, rep *pgxpool.Pool, rw http.ResponseWriter, user_id int, ads_id int) (err error) {
+func (repo *MyRepository) MediatorFinishJobUserSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, logger zerolog.Logger, chat_id int, amount int, comment string, user_id int) (err error) {
+	op := "internal.database.adsDB.MediatorFinishJobUserSQL"
+
+	request, err := rep.Query( //это запрос на вывод наших сообщений
+		ctx,
+		`
+		WITH dispute AS (
+			SELECT id
+			FROM orders.disputes 
+			WHERE chat_id = $1 AND winner_id IS NULL
+		),
+		adss AS (
+			SELECT ad_id 
+			FROM chat.chats 
+			WHERE id = $1
+		),
+		owner AS (
+			SELECT owner_id 
+			FROM ads.ads
+			WHERE id = (SELECT ad_id FROM adss)
+		),
+		user_1 AS (
+			SELECT user_1_id 
+			FROM chat.chats 
+			WHERE id = $1 AND user_1_id != (SELECT owner_id FROM owner)
+		),
+		user_2 AS (
+			SELECT user_2_id 
+			FROM chat.chats 
+			WHERE id = $1 AND user_2_id != (SELECT owner_id FROM owner)
+		),
+		user_combined AS (
+			SELECT user_1_id AS user_id FROM user_1
+			UNION
+			SELECT user_2_id AS user_id FROM user_2
+		),
+		i AS (
+			UPDATE chat.chats
+			SET have_disput = false,
+				mediator_id = null
+			WHERE id = $1 
+				AND (user_1_id = (SELECT COALESCE(MAX(user_id), 0) AS user_id FROM user_combined)
+					OR user_2_id = (SELECT COALESCE(MAX(user_id), 0) AS user_id FROM user_combined))
+			RETURNING (SELECT COALESCE(MAX(user_id), 0) AS user_id FROM user_combined) AS user_id
+		),
+		wallet AS (
+			SELECT id
+			FROM finance.wallets
+			WHERE user_id = (SELECT COALESCE(MAX(user_id), 0) AS user_id FROM user_combined)
+		),
+		book_transaction AS (
+			SELECT id
+			FROM finance.transactions
+			WHERE wallet_id IN (SELECT id FROM wallet)
+		),
+		amount_transact AS (
+			SELECT transaction_id
+			FROM orders.bookings
+			WHERE ads_id = (SELECT ad_id FROM adss)
+				AND ends_at >= NOW()
+				AND transaction_id IN (SELECT id FROM book_transaction)
+			ORDER BY id DESC
+			LIMIT 1
+		),
+		amountt AS (
+			SELECT 
+				id,
+				amount
+			FROM finance.transactions
+			WHERE id IN (SELECT transaction_id FROM amount_transact)
+		),
+		wall_upd AS (
+			UPDATE finance.wallets
+			SET total_balance = total_balance + $2,
+				frozen_funds = frozen_funds - $2
+			WHERE user_id = (SELECT COALESCE(MAX(user_id), 0) AS user_id FROM user_combined)
+				AND $2 <= frozen_funds AND $2 <= (SElECT amount FROM amountt)
+			RETURNING (SELECT COALESCE(MAX(user_id), 0) AS user_id FROM user_combined) AS user_id, id, frozen_funds
+		),
+		transact AS (
+			INSERT INTO finance.transactions (wallet_id, amount, typee, user_2)
+			SELECT (SELECT id FROM wall_upd),
+				(SELECT frozen_funds FROM wall_upd),
+				3,
+				$4
+			RETURNING id, amount
+		)
+		UPDATE orders.disputes
+		SET winner_id = (SELECT user_id FROM i),
+			date_of_win = NOW(),
+			comments = $3
+		WHERE chat_id = $1 AND winner_id IS NULL 
+		RETURNING id;
+		`,
+
+		chat_id,
+		amount,
+		comment,
+		user_id,
+	)
+	fmt.Println(err)
+	if err != nil {
+		logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с обработкой SQL запроса", op))
+
+		return
+	}
+
+	var id_chat int
+
+	for request.Next() {
+		err := request.Scan(
+			&id_chat,
+		)
+		if err != nil {
+			logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с обработкой извлечением данных из SQL запроса", op))
+
+			continue
+		}
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    int    `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	if id_chat != 0 {
+		response := Response{
+			Status:  "success",
+			Data:    id_chat,
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
+
+	response := Response{
+		Status:  "fatal",
+		Message: "Не показано",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return err
+}
+
+func (repo *MyRepository) MediatorFinishJobOwnerSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, logger zerolog.Logger, chat_id int, comment string) (err error) {
+	op := "internal.database.adsDB.MediatorFinishJobOwnerSQL"
+
+	request, err := rep.Query( //это запрос на вывод наших сообщений
+		ctx,
+		`
+		WITH dispute AS (
+			SELECT id 
+			FROM orders.disputes 
+			WHERE chat_id = $1 AND winner_id IS NULL
+		),
+		adss AS (
+			SELECT ad_id 
+			FROM chat.chats 
+			WHERE id = $1
+		),
+		owner AS (
+			SELECT owner_id 
+			FROM ads.ads 
+			WHERE id = (SELECT ad_id FROM adss)
+		),
+		i AS (
+			UPDATE chat.chats
+			SET have_disput = false,
+				mediator_id = null
+			WHERE id = $1 
+				AND (user_1_id = (SELECT owner_id FROM owner) OR user_2_id = (SELECT owner_id FROM owner)) 
+			RETURNING (SELECT owner_id FROM owner) AS user_id
+		)
+		UPDATE orders.disputes 
+		SET winner_id = (SELECT user_id FROM i),
+			date_of_win = NOW(),
+			comments = $2
+		WHERE chat_id = $1 AND winner_id IS NULL 
+		RETURNING id;
+		`,
+
+		chat_id,
+		comment,
+	)
+	if err != nil {
+		logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с обработкой SQL запроса", op))
+
+		return
+	}
+
+	var disput_id int
+
+	for request.Next() {
+		err := request.Scan(
+			&disput_id,
+		)
+		if err != nil {
+			logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с обработкой извлечением данных из SQL запроса", op))
+
+			continue
+		}
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    int    `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	if err == nil && disput_id != 0 {
+		response := Response{
+			Status:  "success",
+			Data:    disput_id,
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
+	}
+
+	response := Response{
+		Status:  "fatal",
+		Message: "Не показано",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return err
+}
+
+func (repo *MyRepository) SigFavAdsSQL(ctx context.Context, rep *pgxpool.Pool, rw http.ResponseWriter, r *http.Request, rdb *redis.Client, сonnection map[int]*websocket.Conn, user_id int, ads_id int) (err error) {
 	request, err := rep.Query(
 		ctx,
-		"INSERT INTO Ads.favorite_ads(user_id, ad_id) VALUES ($1, $2) RETURNING ad_id;",
+		`
+		WITH fav_ads AS (
+			INSERT INTO Ads.favorite_ads(user_id, ad_id) VALUES ($1, $2) RETURNING ad_id, reg_at
+		)
+		SELECT
+			(SELECT ad_id FROM fav_ads),
+			(SELECT reg_at FROM fav_ads),
+			ads.owner_id
+		FROM ads.ads
+		WHERE ads.id = (SELECT ad_id FROM fav_ads);
+		`,
 
 		user_id,
 		ads_id,
 	)
 
 	var ad_id int
+	var reg_at time.Time
+	var buddy_id int
 	for request.Next() {
 		err := request.Scan(
 			&ad_id,
+			&reg_at,
+			&buddy_id,
 		)
 		if err != nil {
 			fmt.Println(err)
@@ -2290,16 +2806,52 @@ func (repo *MyRepository) SigFavAdsSQL(ctx context.Context, rep *pgxpool.Pool, r
 		rw.WriteHeader(http.StatusOK)
 		json.NewEncoder(rw).Encode(response)
 		return err
-	} else {
-		response := Response{
-			Status:  "success",
-			Data:    ad_id,
-			Message: "Объявление добавлено",
-		}
-
-		rw.WriteHeader(http.StatusOK)
-		json.NewEncoder(rw).Encode(response)
 	}
+	response := Response{
+		Status:  "success",
+		Data:    ad_id,
+		Message: "Объявление добавлено",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	//достаём аву и имя
+	request, err = rep.Query(
+		ctx,
+		`
+		SELECT
+			users.avatar_path,
+			COALESCE(individual_user.name, company_user.name_of_company),
+			users.user_role
+		FROM users.users
+		LEFT JOIN users.individual_user ON individual_user.user_id = users.id
+		LEFT JOIN users.company_user ON company_user.user_id = users.id
+		WHERE users.id = $1
+		`,
+
+		user_id,
+	)
+	errorr(err)
+
+	var user_role int
+	var avatar_path string
+	var name string
+
+	for request.Next() {
+		err := request.Scan(
+			&avatar_path,
+			&name,
+			&user_role,
+		)
+		if err != nil {
+			fmt.Println(err)
+
+			continue
+		}
+	}
+
+	Reviews_Notification(ctx, buddy_id, сonnection[buddy_id], "reg_fav_ads", ad_id, "Ваше объявление добавили в избранное", reg_at, user_id, user_role, ServeSpecificMediaBase64(rw, r, avatar_path), name, rdb)
 
 	return
 }
@@ -2470,6 +3022,7 @@ func (repo *MyRepository) GroupFavByRecentSQL(ctx context.Context, rw http.Respo
 
 		Title         string
 		Hourly_rate   int
+		Daily_rate    int
 		Description   string
 		Duration      string
 		Created_at    time.Time
@@ -2507,6 +3060,7 @@ func (repo *MyRepository) GroupFavByRecentSQL(ctx context.Context, rw http.Respo
 			COALESCE(t1.File_path::TEXT, '/root/'),
 			t2.Title::TEXT,
 			t2.Hourly_rate,
+			t2.Daily_rate,
 			t2.Description::TEXT,
 			Duration(
 				(SELECT d.date_range::date[] FROM duration d WHERE t2.id = ANY(d.ad_ids))
@@ -2555,9 +3109,8 @@ func (repo *MyRepository) GroupFavByRecentSQL(ctx context.Context, rw http.Respo
 		ORDER BY t2.Created_at desc
 		`,
 
-		29)
+		user_id)
 	errorr(err)
-	fmt.Println(err)
 
 	for request.Next() {
 		p := Product{}
@@ -2565,6 +3118,7 @@ func (repo *MyRepository) GroupFavByRecentSQL(ctx context.Context, rw http.Respo
 			&p.Ads_path, //кладем сюда множество, длиною в три ӕлемента, с путями фоток
 			&p.Title,
 			&p.Hourly_rate,
+			&p.Daily_rate,
 			&p.Description,
 			&Duration_mass,
 			&p.Created_at,
@@ -2613,6 +3167,17 @@ func (repo *MyRepository) GroupFavByRecentSQL(ctx context.Context, rw http.Respo
 		json.NewEncoder(rw).Encode(response)
 
 		return err
+	} else if len(products) == 0 {
+		response := Response{
+			Status:  "success",
+			Data:    []Product{{}},
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
 	}
 
 	response := Response{
@@ -2636,6 +3201,7 @@ func (repo *MyRepository) GroupFavByCheaperSQL(ctx context.Context, rw http.Resp
 
 		Title         string
 		Hourly_rate   int
+		Daily_rate    int
 		Description   string
 		Duration      string
 		Created_at    time.Time
@@ -2673,6 +3239,7 @@ func (repo *MyRepository) GroupFavByCheaperSQL(ctx context.Context, rw http.Resp
 			COALESCE(t1.File_path::TEXT, '/root/'),
 			t2.Title::TEXT,
 			t2.Hourly_rate,
+			t2.Daily_rate,
 			t2.Description::TEXT,
 			Duration(
 				(SELECT d.date_range::date[] FROM duration d WHERE t2.id = ANY(d.ad_ids))
@@ -2707,6 +3274,7 @@ func (repo *MyRepository) GroupFavByCheaperSQL(ctx context.Context, rw http.Resp
 			COALESCE(t1.File_path::TEXT, '/root/'),
 			t2.Title::TEXT,
 			t2.Hourly_rate,
+			t2.Daily_rate,
 			t2.Description::TEXT,
 			duration_result, -- Функция принимает массив
 			t2.Created_at,
@@ -2718,9 +3286,9 @@ func (repo *MyRepository) GroupFavByCheaperSQL(ctx context.Context, rw http.Resp
 			Ads_id,
 			t2.Owner_id,
 			t2.Category_id
-		ORDER BY t2.Hourly_rate ASC;
+		ORDER BY (t2.Hourly_rate + t2.Daily_rate) DESC;
 		`,
-		29)
+		user_id)
 	errorr(err)
 
 	for request.Next() {
@@ -2729,6 +3297,7 @@ func (repo *MyRepository) GroupFavByCheaperSQL(ctx context.Context, rw http.Resp
 			&p.Ads_path, //кладем сюда множество, длиною в три ӕлемента, с путями фоток
 			&p.Title,
 			&p.Hourly_rate,
+			&p.Daily_rate,
 			&p.Description,
 			&Duration_mass,
 			&p.Created_at,
@@ -2767,7 +3336,7 @@ func (repo *MyRepository) GroupFavByCheaperSQL(ctx context.Context, rw http.Resp
 		Message string    `json:"message"`
 	}
 
-	if err != nil || len(products) == 0 {
+	if err != nil {
 		response := Response{
 			Status:  "fatal",
 			Message: "Не показано",
@@ -2777,6 +3346,17 @@ func (repo *MyRepository) GroupFavByCheaperSQL(ctx context.Context, rw http.Resp
 		json.NewEncoder(rw).Encode(response)
 
 		return err
+	} else if len(products) == 0 {
+		response := Response{
+			Status:  "success",
+			Data:    []Product{{}},
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
 	}
 
 	response := Response{
@@ -2800,6 +3380,7 @@ func (repo *MyRepository) GroupFavByDearlySQL(ctx context.Context, rw http.Respo
 
 		Title         string
 		Hourly_rate   int
+		Daily_rate    int
 		Description   string
 		Duration      string
 		Created_at    time.Time
@@ -2837,6 +3418,7 @@ func (repo *MyRepository) GroupFavByDearlySQL(ctx context.Context, rw http.Respo
 			COALESCE(t1.File_path::TEXT, '/root/'),
 			t2.Title::TEXT,
 			t2.Hourly_rate,
+			t2.Daily_rate,
 			t2.Description::TEXT,
 			Duration(
 				(SELECT d.date_range::date[] FROM duration d WHERE t2.id = ANY(d.ad_ids))
@@ -2871,6 +3453,7 @@ func (repo *MyRepository) GroupFavByDearlySQL(ctx context.Context, rw http.Respo
 			COALESCE(t1.File_path::TEXT, '/root/'),
 			t2.Title::TEXT,
 			t2.Hourly_rate,
+			t2.Daily_rate,
 			t2.Description::TEXT,
 			duration_result, -- Функция принимает массив
 			t2.Created_at,
@@ -2882,9 +3465,9 @@ func (repo *MyRepository) GroupFavByDearlySQL(ctx context.Context, rw http.Respo
 			Ads_id,
 			t2.Owner_id,
 			t2.Category_id
-		ORDER BY t2.Hourly_rate DESC;
+		ORDER BY (t2.Hourly_rate + t2.Daily_rate) ASC;
 		`,
-		29)
+		user_id)
 	errorr(err)
 
 	for request.Next() {
@@ -2893,6 +3476,7 @@ func (repo *MyRepository) GroupFavByDearlySQL(ctx context.Context, rw http.Respo
 			&p.Ads_path, //кладем сюда множество, длиною в три ӕлемента, с путями фоток
 			&p.Title,
 			&p.Hourly_rate,
+			&p.Daily_rate,
 			&p.Description,
 			&Duration_mass,
 			&p.Created_at,
@@ -2931,7 +3515,7 @@ func (repo *MyRepository) GroupFavByDearlySQL(ctx context.Context, rw http.Respo
 		Message string    `json:"message"`
 	}
 
-	if err != nil || len(products) == 0 {
+	if err != nil {
 		response := Response{
 			Status:  "fatal",
 			Message: "Не показано",
@@ -2941,6 +3525,17 @@ func (repo *MyRepository) GroupFavByDearlySQL(ctx context.Context, rw http.Respo
 		json.NewEncoder(rw).Encode(response)
 
 		return err
+	} else if len(products) == 0 {
+		response := Response{
+			Status:  "success",
+			Data:    []Product{{}},
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return
 	}
 
 	response := Response{
@@ -2966,12 +3561,51 @@ func (repo *MyRepository) GroupAdsByRentedSQL(ctx context.Context, rw http.Respo
 		Position    pgtype.Point
 		Created_at  time.Time
 		Updated_at  time.Time
+		Duration    string
 	}
 	products := []Product{}
 
 	request, err := rep.Query(
 		ctx,
-		"SELECT id, title, description, hourly_rate, daily_rate, owner_id, category_id, position, created_at, updated_at FROM Ads.ads WHERE status = true AND owner_id = $1;",
+		`
+		WITH duration AS (
+			WITH duration AS (
+				SELECT
+					ads.id,
+					ads.owner_id,
+					ARRAY[
+						COALESCE(MAX(bookings.starts_at), '1900-01-01'),
+						COALESCE(MAX(bookings.ends_at), '1900-01-01')
+					] AS date_range
+				FROM 
+					ads.ads
+				LEFT JOIN 
+					orders.bookings
+				ON 
+					bookings.ads_id = ads.id
+				GROUP BY 
+					ads.id, ads.owner_id
+			)
+			SELECT * FROM duration
+		)
+		SELECT 
+			id, 
+			title, 
+			description, 
+			hourly_rate, 
+			daily_rate, 
+			owner_id, 
+			category_id, 
+			position, 
+			created_at, 
+			updated_at,
+			COALESCE((Duration(
+				(SELECT d.date_range::date[] FROM duration d WHERE d.id = ads.id)
+			))[1], 'Нет точной информации')
+		FROM Ads.ads 
+		WHERE 
+			status = true AND owner_id = $1;
+		`,
 
 		user_id,
 	)
@@ -2990,6 +3624,7 @@ func (repo *MyRepository) GroupAdsByRentedSQL(ctx context.Context, rw http.Respo
 			&p.Position,
 			&p.Created_at,
 			&p.Updated_at,
+			&p.Duration,
 		)
 		if err != nil {
 			fmt.Println(err)
@@ -3039,12 +3674,50 @@ func (repo *MyRepository) GroupAdsByArchivedSQL(ctx context.Context, rw http.Res
 		Created_at  time.Time
 		Updated_at  time.Time
 		Bool_state  bool
+		Duration    string
 	}
 	products := []Product{}
 
 	request, err := rep.Query(
 		ctx,
-		"SELECT id, title, description, hourly_rate, daily_rate, owner_id, category_id, position, created_at, updated_at, false FROM Ads.ads WHERE status = false AND owner_id = $1;",
+		`
+		WITH duration AS (
+			WITH duration AS (
+				SELECT
+					ads.id,
+					ads.owner_id,
+					ARRAY[
+						COALESCE(MAX(bookings.starts_at), '1900-01-01'),
+						COALESCE(MAX(bookings.ends_at), '1900-01-01')
+					] AS date_range
+				FROM 
+					ads.ads
+				LEFT JOIN 
+					orders.bookings
+				ON 
+					bookings.ads_id = ads.id
+				GROUP BY 
+					ads.id, ads.owner_id
+			)
+			SELECT * FROM duration
+		)
+		SELECT 
+			id, 
+			title, 
+			description, 
+			hourly_rate, 
+			daily_rate, 
+			owner_id, 
+			category_id, 
+			position, 
+			created_at, 
+			updated_at, 
+			false,
+			COALESCE((Duration(
+				(SELECT d.date_range::date[] FROM duration d WHERE d.id = ads.id)
+			))[1], 'Нет точной информации')
+		FROM Ads.ads
+		WHERE status = false AND owner_id = $1;`,
 
 		user_id,
 	)
@@ -3067,6 +3740,7 @@ func (repo *MyRepository) GroupAdsByArchivedSQL(ctx context.Context, rw http.Res
 			&p.Created_at,
 			&p.Updated_at,
 			&p.Bool_state,
+			&p.Duration,
 		)
 		if err != nil {
 			fmt.Println(err)
@@ -3091,6 +3765,8 @@ func (repo *MyRepository) GroupAdsByArchivedSQL(ctx context.Context, rw http.Res
 		json.NewEncoder(rw).Encode(response)
 		return err
 	} else {
+		fmt.Println(products)
+
 		response := Response{
 			Status:  "success",
 			Data:    products,
