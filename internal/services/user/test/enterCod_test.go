@@ -1,205 +1,174 @@
 package test
 
-// import (
-// 	"bytes"
-// 	"context"
-// 	"encoding/json"
-// 	"fmt"
-// 	"myproject/internal/services/user"
-// 	"net/http"
-// 	"net/http/httptest"
-// 	"os"
-// 	"testing"
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"myproject/internal/services/user"
+	"net/http"
+	"net/http/httptest"
+	"os"
 
-// 	"github.com/go-redis/redis/v8"
-// 	"github.com/julienschmidt/httprouter"
-// 	"github.com/rs/zerolog"
-// 	"github.com/stretchr/testify/require"
-// )
+	"testing"
 
-// func TestEnterCodeHandler(t *testing.T) {
-// 	op := "internal.services.user.test.TestSignupUserHandler"
+	"github.com/go-redis/redismock/v8"
+	"github.com/julienschmidt/httprouter"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+)
 
-// 	// Подключение к реальному Redis
-// 	redisClient := redis.NewClient(&redis.Options{
-// 		Addr: "localhost:6379", // Убедитесь, что Redis работает локально или измените адрес
-// 	})
-// 	defer redisClient.Close()
+// Преобразует `httprouter.Handle` в `http.HandlerFunc`
+func httprouterAdapterEnterCod(h httprouter.Handle) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		h(w, r, httprouter.Params{}) // передаём пустые параметры
+	}
+}
 
-// 	ctx := context.Background()
-// 	logger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr})
+// Структура тестов
+type testCase struct {
+	name          string      // имя теста, в котором содержится его кратакя характеристика
+	emailOrPhone  string      // почта или телефон, на который пришёл код
+	expectCode    interface{} // код из ответа
+	request_token string      // токен для получения информации(кода) из кеша
+	typee         int         // это нужно для тестов (1 - регистрация через имейл, 2 - через номер телефона)
+	expectMsg     string      // JSON ответ
+	// симулируя ошибочное поведение зависимостей. Оно используется для проверки, как хендлер обрабатывает внутренние ошибки.
+}
 
-// 	handlerData := &user.SignupHandler{
-// 		RedisClient: redisClient,
-// 		Logger:      logger,
-// 	}
+var cases = []testCase{
+	{"Valid code from email", "test.octa.one@gmail.com", 1234, "true_jwt", 1, "Код принят"},
+	{"Valid code from phone", "+7(928)074-32-44", 1234, "true_jwt", 2, "Код принят"},
+	{"Valid code and invalid email", "test.octa.oneee@gmail.com", 0000, "true_jwt", 1, "Неверный код"},
+	{"Valid code and invalid phone", "+7(928)074-32-44я", 0000, "true_jwt", 2, "Неверный код"},
+	{"Invalid code from email", "test.octa.one@gmail.com", "папа", "true_jwt", 1, "Неверный формат кода"},
+	{"Invalid code from phone", "+7(928)074-32-44", "мама", "true_jwt", 2, "Неверный формат кода"},
+	{"Unknown email", "test.octa.two@gmail.com", 1234, "false_jwt", 1, "Неверный формат кода"},
+	{"Unknown phone", "+7(928)074-32-45", 1234, "false_jwt", 2, "Неверный формат кода"},
+}
 
-// 	cases := []struct { // описание кейса для тестов
-// 		name         string // имя теста, в котором содержится его кратакя характеристика
-// 		emailOrPhone string // почта или телефон, который указывают и на который придёт код
-// 		typee        int    // это нужно для тестов (1 - регистрация через имейл, 2 - через номер телефона)
-// 		expectCode   int    // код из ответа
-// 		expectMsg    string // JSON ответ
-// 		respError    string // это поле содержит ожидаемую ошибку, которую хендлер должен вернуть в JSON-ответе, если что-то пошло не так.
-// 		// симулируя ошибочное поведение зависимостей. Оно используется для проверки, как хендлер обрабатывает внутренние ошибки.
-// 	}{
-// 		{ // кейс где все ок
-// 			name:         "Valid email",
-// 			emailOrPhone: "test.octa.one@gmail.com",
-// 			typee:        1,
-// 			expectMsg:    "Почта принята",
-// 		},
-// 		// { // кейс где все ок
-// 		// 	name:         "Valid phone",
-// 		// 	emailOrPhone: "+7(928)074-32-44",
-// 		// 	typee:        2,
-// 		// 	expectMsg: "Телефон принят",
-// 		// },
-// 		{ // кейс где указана несуществующая почта
-// 			name:         "Non-existent email",
-// 			emailOrPhone: "test.octa.azamat@gmail.com",
-// 			typee:        1,
-// 			expectMsg:    "Почты получателя не существует",
-// 		},
-// 		// { // кейс где указан несуществующий номер
-// 		// 	name:         "Non-existent phone",
-// 		// 	emailOrPhone: "+7(777)777-77-77",
-// 		// 	typee:        2,
-// 		// },
-// 		{ //кейс где указан неверный формат почты (нет такого оператора)
-// 			name:         "Invalid email format",
-// 			emailOrPhone: "test.octa.one@gagarin.com",
-// 			typee:        1,
-// 			expectMsg:    "Почта принята",
-// 		},
-// 		{ //кейс где указан неверный формат почты (нет такого оператора)
-// 			name:         "Invalid email format",
-// 			emailOrPhone: "test.octa.one@gagagarin.com",
-// 			typee:        1,
-// 			expectMsg:    "Почты получателя не существует",
-// 		},
-// 		// { //кейс где указан неверный формат телефона (слишком много символов)
-// 		// 	name:         "Invalid phone format",
-// 		// 	emailOrPhone: "+7(777)777-777-777",
-// 		// 	typee:        2,
-// 		// },
-// 		{ //кейс где указан неверный формат почты (недопустимые символы)
-// 			name:         "Invalid email symbol",
-// 			emailOrPhone: "test_octa_one@gmail.com",
-// 			typee:        1,
-// 			expectMsg:    "Почты получателя не существует",
-// 		},
-// 		// { //кейс где указан неверный формат телефона (недопустимые символы)
-// 		// 	name:         "Invalid phone symbol",
-// 		// 	emailOrPhone: "+7(928)074_32_44",
-// 		// 	typee:        2,
-// 		// },
-// 		{ // кейс где слишком много символов в почте
-// 			name:         "Too much email symbol",
-// 			emailOrPhone: "test.octa.oneeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee@gmail.com",
-// 			typee:        1,
-// 			expectMsg:    "Почты получателя не существует",
-// 		},
-// 		{ // пустое значение
-// 			name:         "Empty email",
-// 			emailOrPhone: "",
-// 			typee:        1,
-// 			expectMsg:    "Почты получателя не существует",
-// 		},
-// 		// { // пустое значение
-// 		// 	name:         "Empty phone",
-// 		// 	emailOrPhone: "",
-// 		// 	typee:        2,
-// 		// },
-// 		{ // странный символ
-// 			name:         "Incorrect email symbol",
-// 			emailOrPhone: "Ъ",
-// 			typee:        1,
-// 			expectMsg:    "Почты получателя не существует",
-// 		},
-// 		// { // странный символ
-// 		// 	name:         "Incorrect phone symbol",
-// 		// 	emailOrPhone: "+",
-// 		// 	typee:        2,
-// 		// },
-// 		{ // странный символ
-// 			name:         "Strange email symbol 1",
-// 			emailOrPhone: "0",
-// 			typee:        1,
-// 			expectMsg:    "Почты получателя не существует",
-// 		},
-// 		// { // странный символ
-// 		// 	name:         "Strange phone symbol 1",
-// 		// 	emailOrPhone: "Ъ",
-// 		// 	typee:        2,
-// 		// },
-// 		{ // странный символ
-// 			name:         "Strange email symbol 2",
-// 			emailOrPhone: "._+",
-// 			typee:        1,
-// 			expectMsg:    "Почты получателя не существует",
-// 		},
-// 		// { // странный символ
-// 		// 	name:         "Strange phone symbol 2",
-// 		// 	emailOrPhone: "._+",
-// 		// 	typee:        2,
-// 		// },
-// 	}
+// Вспомогательная функция: Создаёт Redis мок и возвращает его вместе с обработчиком
+func setupRedisMok() (*user.SignupHandler, redismock.ClientMock, zerolog.Logger) {
+	// Создаем мок Redis
+	db, mock := redismock.NewClientMock()
+	logger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr})
+	// Передаем мок Redis в обработчик
+	handlerData := &user.SignupHandler{
+		RedisClient: db, // Заменили реальный Redis
+		Logger:      logger,
+		CodeNum:     1234,
+		JWT:         "true_jwt",
+	}
+	return handlerData, mock, logger
+}
 
-// 	for _, tc := range cases { // запускаем цикл, который бы прогнал тест кейсы
-// 		t.Run(tc.name, func(t *testing.T) { // запуск теста, где учитывается его имя и выполняется функция
-// 			handler := handlerData.SignupUserByEmail(redisClient, logger, ctx) // сам хендлер
-// 			wrappedHandler := httprouterAdapter(handler)                       // обёртка, чтобы он возвращал (http.Handler)
+// Вспомогательная функция: Отправляет тестовый HTTP-запрос и проверяет ответ
+func testRequest(t *testing.T, handler http.HandlerFunc, payload string, expectMsg string, path string) {
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBuffer([]byte(payload)))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
 
-// 			payload := fmt.Sprintf(`{"Email": "%s"}`, tc.emailOrPhone)                                          // тестовый JSON запрос
-// 			req := httptest.NewRequest(http.MethodPost, "/signupUserByEmail", bytes.NewBuffer([]byte(payload))) // тестовый HTTP-запрос
-// 			rr := httptest.NewRecorder()                                                                        // создание объекта для записи ответа
+	// Разбираем JSON-ответ
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 
-// 			wrappedHandler.ServeHTTP(rr, req) // вызов хендлера
-// 			// Проверяем тело ответа
-// 			var resp map[string]interface{}                            // карта для распарсенных данных ответа
-// 			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp)) // получает тело HTTP-ответа
-// 			require.Contains(t, resp["message"], tc.expectMsg)         // сверяет сообщения, заложенные в тестах и полученные сорваком
+	// Проверяем сообщение и статус ответа
+	require.Equal(t, expectMsg, resp["message"].(string))
+	require.Equal(t, http.StatusOK, rr.Code)
+}
 
-// 			if resp["data"] != nil {
-// 				val, err := redisClient.Get(ctx, resp["data"].(string)).Result()
-// 				if err != nil {
-// 					logger.Err(err).Msg(fmt.Sprintf("error in %s", op+"; Ошибка при от парсинге данных, полученных из redis"))
+func TestEnterCodeHandler(t *testing.T) {
+	ctx := context.Background()
 
-// 					return
-// 				}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, mock, _ := setupRedisMok()
 
-// 				type Kesh struct {
-// 					Email string `json:"Email"`
-// 					Code  int    `json:"Code"`
-// 				}
+			if tc.typee == 1 {
+				handlerPlayload, _ := json.Marshal(map[string]interface{}{
+					"Email": "",
+					"Code":  tc.expectCode,
+				})
 
-// 				// Создаем экземпляр структуры Kesh
-// 				var kesh Kesh
+				// Данные для Redis
+				keshData, _ := json.Marshal(map[string]interface{}{
+					"Email": tc.emailOrPhone,
+					"Code":  handler.CodeNum,
+				})
 
-// 				// Распарсим строку из Redis в структуру Kesh
-// 				err = json.Unmarshal([]byte(val), &kesh)
-// 				if err != nil {
-// 					logger.Err(err).Msg(fmt.Sprintf("error in %s", op+"; Ошибка при парсинге JSON из данных Redis"))
-// 					return
-// 				}
+				// тут будет эмитация пердыдущего хендлера
+				if tc.emailOrPhone == "test.octa.oneee@gmail.com" {
+					// Данные для Redis
+					kesh, _ := json.Marshal(map[string]interface{}{
+						"Email": "nil",
+						"Code":  12345,
+					})
 
-// 				require.Equal(t, kesh.Code, handlerData.CodeNum) // проверка кода ответа
-// 			}
+					// Настраиваем Redis мок
+					mock.MatchExpectationsInOrder(false)
+					mock.ExpectGet(handler.JWT).SetVal(string(kesh))
 
-// 			require.Equal(t, http.StatusOK, rr.Code) // проверка кода ответа
-// 		})
-// 	}
-// }
+					handlerFunc := handler.EnterCodeFromEmail(ctx)
+					testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(handlerPlayload), tc.expectMsg, "/enterCodeFromEmail")
 
-// /*
-// 	fmt.Println("Info: ", resp)
-// 	fmt.Println("Data: ", resp["data"])
-// 	fmt.Println("Message: ", resp["message"])
-// */
+					return
+				}
 
-// func httprouterAdapter(h httprouter.Handle) http.Handler {
-// 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-// 		h(w, r, httprouter.Params{})
-// 	})
-// }
+				if tc.emailOrPhone == "test.octa.two@gmail.com" {
+					handlerFunc := handler.EnterCodeFromEmail(ctx)
+					testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(""), tc.expectMsg, "/enterCodeFromPhone")
+
+					return
+				}
+
+				// Настраиваем Redis мок
+				mock.MatchExpectationsInOrder(false)
+				mock.ExpectGet(handler.JWT).SetVal(string(keshData))
+
+				handlerFunc := handler.EnterCodeFromEmail(ctx)
+				testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(handlerPlayload), tc.expectMsg, "/enterCodeFromEmail")
+			} else {
+				handlerPlayload, _ := json.Marshal(map[string]interface{}{
+					"Email": "",
+					"Code":  tc.expectCode,
+				})
+
+				// Данные для Redis
+				keshData, _ := json.Marshal(map[string]interface{}{
+					"Phone_num": tc.emailOrPhone,
+					"Code":      handler.CodeNum,
+				})
+
+				if tc.emailOrPhone == "+7(928)074-32-44я" {
+					// Данные для Redis
+					kesh, _ := json.Marshal(map[string]interface{}{
+						"Phone_num": "nil",
+						"Code":      12345,
+					})
+
+					// Настраиваем Redis мок
+					mock.MatchExpectationsInOrder(false)
+					mock.ExpectGet(handler.JWT).SetVal(string(kesh))
+
+					handlerFunc := handler.EnterCodeFromEmail(ctx)
+					testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(handlerPlayload), tc.expectMsg, "/enterCodeFromPhone")
+
+					return
+				}
+
+				if tc.emailOrPhone == "+7(928)074-32-45" {
+					handlerFunc := handler.EnterCodeFromEmail(ctx)
+					testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(""), tc.expectMsg, "/enterCodeFromPhone")
+
+					return
+				}
+
+				// Настраиваем Redis мок
+				mock.MatchExpectationsInOrder(false)
+				mock.ExpectGet(handler.JWT).SetVal(string(keshData))
+
+				handlerFunc := handler.EnterCodeFromEmail(ctx)
+				testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(handlerPlayload), tc.expectMsg, "/enterCodeFromPhone")
+			}
+		})
+	}
+}

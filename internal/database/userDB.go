@@ -35,7 +35,7 @@ type Repository struct { // используется в пакете app и serv
 }
 
 type MyRepository struct {
-	app *Repository
+	App *Repository
 }
 
 type SignupHandler struct {
@@ -132,13 +132,10 @@ func UploadAvatar(rw http.ResponseWriter, imageBase64, directory, user_id, index
 	defer dst.Close()
 
 	// Записываем данные в файл
-	fmt.Println("Writing data to file")
 	if _, err := dst.Write(data); err != nil {
 		http.Error(rw, fmt.Sprintf("Error writing to file %s: %v", fileName, err), http.StatusInternalServerError)
 		return err, false, ""
 	}
-
-	fmt.Println("File successfully created at:", filePath)
 
 	return nil, true, filePath
 }
@@ -288,14 +285,12 @@ func (repo *MyRepository) SigLegalUserEmailSQL(
 		name_of_company,
 		address_name,
 	)
-	errorr(err)
 
 	var User_id int
 	for result.Next() {
 		err := result.Scan(
 			&User_id,
 		)
-		fmt.Println(err)
 
 		if err != nil {
 			fmt.Println(err)
@@ -442,7 +437,6 @@ func (repo *MyRepository) SigNaturUserEmailSQL(
 
 	Data,
 	file_path string) (err error) {
-	fmt.Println("dwa2")
 	result, errors := rep.Query(ctx,
 		`
 			WITH i AS (

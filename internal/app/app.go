@@ -189,11 +189,11 @@ func (application *MyApp) Routes(r *httprouter.Router, Ctx context.Context, dbpo
 	r.POST("/signupUserByEmail", user.SignupUserByEmailCreater(rdb, logger, Ctx)) //пользователь укзывает почту(регистрация)
 	r.POST("/signupUserByPhone", user.SignupUserByPhoneCreater(rdb, logger, Ctx)) //пользователь укзывает телефон(регистрация)
 	// enterCode_test
-	r.POST("/enterCodeFromEmail", user.EnterCodeFromEmail(rdb, logger, Ctx)) //пользователь укзывает код почта
-	r.POST("/enterCodeFromPhone", user.EnterCodeFromPhone(rdb, logger, Ctx)) //пользователь укзывает код телефон
+	r.POST("/enterCodeFromEmail", user.EnterCodeFromEmailCreater(rdb, logger, Ctx)) //пользователь укзывает код почта
+	r.POST("/enterCodeFromPhone", user.EnterCodeFromPhoneCreater(rdb, logger, Ctx)) //пользователь укзывает код телефон
 	// signupLegal_test
-	r.POST("/signupLegalEmail", user.SignupLegalEmail(rdb, logger, Ctx, dbpool)) //передача данных Юридического лица (регистрация) Email
-	r.POST("/signupLegalPhone", user.SignupLegalPhone(rdb, logger, Ctx, dbpool)) //передача данных Юридического лица (регистрация) Email
+	r.POST("/signupLegalEmail", user.SignupLegalEmailCreater(rdb, logger, Ctx, dbpool)) //передача данных Юридического лица (регистрация) Email
+	r.POST("/signupLegalPhone", user.SignupLegalPhoneCreater(rdb, logger, Ctx, dbpool)) //передача данных Юридического лица (регистрация) Photo
 	// signupNatur_test
 	r.POST("/signupNaturEmail", user.SignupNaturEmail(rdb, logger, Ctx, dbpool)) //передача данных Физического лица (регистрация) Email
 	r.POST("/signupNaturPhone", user.SignupNaturPhone(rdb, logger, Ctx, dbpool)) //передача данных Физического лица (регистрация) Email

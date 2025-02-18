@@ -32,12 +32,13 @@ import (
 )
 
 type SignupHandler struct {
-	RedisClient *redis.Client
-	Logger      zerolog.Logger
-	CodeNum     int
-	RespError   error
-	JWT         string
-	RequestURL  string
+	RedisClient  *redis.Client
+	Logger       zerolog.Logger
+	EmailOrPhone string
+	CodeNum      int
+	RespError    error
+	JWT          string
+	RequestURL   string
 }
 
 func verifyEmail(email string) bool {
@@ -395,23 +396,9 @@ func (h *SignupHandler) SignupUserByPhone(logger zerolog.Logger, ctx context.Con
 	}
 }
 
-func EnterCodeFromEmail(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context) httprouter.Handle {
-	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		op := "internal.services.user.EnterCodeFromEmail"
-		type RegCode struct {
-			Email string `json:"Email"`
-			Code  int    `json:"Code"`
-		}
-
-		var email RegCode
-
-		// Парсинг JSON-запроса
-		err := json.NewDecoder(r.Body).Decode(&email)
-		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при сохранении кода в парсинге JSON-запроса")
-
-			return
-		}
+func EnterCodeFromEmailCreater(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		op := "internal.services.user.EnterCodeFromEmailCreater"
 
 		// Попытка прочитать куку
 		token, err := r.Cookie("request_token")
@@ -424,12 +411,14 @@ func EnterCodeFromEmail(redisClient *redis.Client, logger zerolog.Logger, ctx co
 
 			logger.Err(err).Msg(" error in " + op + "; Проблема с чтением куки")
 			return
+
 		}
 
 		if token.Value == "" {
 			logger.Err(err).Msg(" error in " + op + "; Токен пуст")
 
 			return
+
 		}
 
 		token_flag, _, _ := jwt.IsAuthorized(token.Value)
@@ -437,28 +426,30 @@ func EnterCodeFromEmail(redisClient *redis.Client, logger zerolog.Logger, ctx co
 			logger.Err(err).Msg(" error in " + op + "; Неверный токен")
 
 			return
+
 		}
 
-		// Получаем данные из Redis
-		keshData, err := redisClient.Get(ctx, token.Value).Result()
-		if err == redis.Nil {
-			logger.Err(err).Msg(" error in " + op + "; Ключ не найден")
-
-			return
-		} else if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
-
-			return
+		handler := &SignupHandler{
+			RedisClient: redisClient,
+			Logger:      logger,
+			JWT:         token.Value,
 		}
 
-		// Десериализуем JSON обратно в структуру kesh
-		var storedKesh RegCode
-		err = json.Unmarshal([]byte(keshData), &storedKesh)
-		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
+		// 4) Вызываем дальше нужную логику: например, метод EnterCodeFromEmail
+		subHandler := handler.EnterCodeFromEmail(ctx)
+		subHandler(w, r, ps) // передаём управление вашему вторичному хендлеру
+	}
+}
 
-			return
+func (h *SignupHandler) EnterCodeFromEmail(ctx context.Context) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		op := "internal.services.user.EnterCodeFromEmail"
+		type RegCode struct {
+			Email string `json:"Email"`
+			Code  int    `json:"Code"`
 		}
+
+		var email RegCode
 
 		// Создаем структуру ответа
 		type Response struct {
@@ -467,11 +458,57 @@ func EnterCodeFromEmail(redisClient *redis.Client, logger zerolog.Logger, ctx co
 			Message string `json:"message"`
 		}
 
+		// Парсинг JSON-запроса
+		err := json.NewDecoder(r.Body).Decode(&email)
+		if err != nil {
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при сохранении кода в парсинге JSON-запроса")
+
+			h.Logger.Info().
+				Str("service", op).
+				Int("port", 8080).
+				Msg("Неверный формат кода")
+
+			response := Response{
+				Status:  "fatal",
+				Message: "Неверный формат кода",
+			}
+			// Отправляем ответ
+			err = json.NewEncoder(w).Encode(response)
+			if err != nil {
+				h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при отправке ответа после операции")
+
+				return
+			}
+
+			return
+		}
+
+		// Получаем данные из Redis
+		keshData, err := h.RedisClient.Get(ctx, h.JWT).Result()
+		if err == redis.Nil {
+			h.Logger.Err(err).Msg(" error in " + op + "; Ключ не найден")
+
+			return
+		} else if err != nil {
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
+
+			return
+		}
+
+		// Десериализуем JSON обратно в структуру kesh
+		var storedKesh RegCode
+		err = json.Unmarshal([]byte(keshData), &storedKesh)
+		if err != nil {
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
+
+			return
+		}
+
 		var response Response
 
 		// Проверяем код
-		if storedKesh.Code == storedKesh.Code {
-			logger.Info().
+		if email.Code == storedKesh.Code {
+			h.Logger.Info().
 				Str("service", op).
 				Int("port", 8080).
 				Msg("Код принят")
@@ -482,7 +519,7 @@ func EnterCodeFromEmail(redisClient *redis.Client, logger zerolog.Logger, ctx co
 				Message: "Код принят",
 			}
 		} else {
-			logger.Info().
+			h.Logger.Info().
 				Str("service", op).
 				Int("port", 8080).
 				Msg("Неверный код")
@@ -496,7 +533,7 @@ func EnterCodeFromEmail(redisClient *redis.Client, logger zerolog.Logger, ctx co
 		// Отправляем ответ
 		err = json.NewEncoder(w).Encode(response)
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при отправке ответа после операции")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при отправке ответа после операции")
 
 			return
 		}
@@ -504,7 +541,52 @@ func EnterCodeFromEmail(redisClient *redis.Client, logger zerolog.Logger, ctx co
 	}
 }
 
-func EnterCodeFromPhone(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context) httprouter.Handle {
+func EnterCodeFromPhoneCreater(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		op := "internal.services.user.EnterCodeFromEmailCreater"
+
+		// Попытка прочитать куку
+		token, err := r.Cookie("request_token")
+		if err != nil {
+			if err == http.ErrNoCookie {
+				logger.Err(err).Msg(" error in " + op + "; Кука не найдена")
+
+				return
+			}
+
+			logger.Err(err).Msg(" error in " + op + "; Проблема с чтением куки")
+			return
+
+		}
+
+		if token.Value == "" {
+			logger.Err(err).Msg(" error in " + op + "; Токен пуст")
+
+			return
+
+		}
+
+		token_flag, _, _ := jwt.IsAuthorized(token.Value)
+		if !token_flag {
+			logger.Err(err).Msg(" error in " + op + "; Неверный токен")
+
+			return
+
+		}
+
+		handler := &SignupHandler{
+			RedisClient: redisClient,
+			Logger:      logger,
+			JWT:         token.Value,
+		}
+
+		// 4) Вызываем дальше нужную логику: например, метод EnterCodeFromEmail
+		subHandler := handler.EnterCodeFromPhone(ctx)
+		subHandler(w, r, ps) // передаём управление вашему вторичному хендлеру
+	}
+}
+
+func (h *SignupHandler) EnterCodeFromPhone(ctx context.Context) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		op := "internal.services.user.EnterCodeFromPhone"
 		var phone model.Reg_code
@@ -516,26 +598,14 @@ func EnterCodeFromPhone(redisClient *redis.Client, logger zerolog.Logger, ctx co
 			return
 		}
 
-		// Попытка прочитать куку
-		token, err := function.ReadCookie("request_token", r)
-		if err != nil {
-			logger.Err(err).Msg(fmt.Sprintf("error in %v; Ошибка при чтении куки", op))
-		}
-
-		token_flag, _, _ := jwt.IsAuthorized(token)
-
-		if !token_flag {
-			logger.Err(err).Msg(fmt.Sprintf("error in %v; Ошибка при чтении JWT", op))
-		}
-
 		// Получаем данные из Redis
-		keshData, err := redisClient.Get(ctx, token).Result()
+		keshData, err := h.RedisClient.Get(ctx, h.JWT).Result()
 		if err == redis.Nil {
-			logger.Err(err).Msg(fmt.Sprintf("error in %v; Ключ не найден", op))
+			h.Logger.Err(err).Msg(fmt.Sprintf("error in %v; Ключ не найден", op))
 
 			return
 		} else if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
 
 			return
 		}
@@ -544,7 +614,26 @@ func EnterCodeFromPhone(redisClient *redis.Client, logger zerolog.Logger, ctx co
 		var storedKesh model.Phone_kesh
 		err = json.Unmarshal([]byte(keshData), &storedKesh)
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
+
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при сохранении кода в парсинге JSON-запроса")
+
+			h.Logger.Info().
+				Str("service", op).
+				Int("port", 8080).
+				Msg("Неверный формат кода")
+
+			response := model.Response{
+				Status:  "fatal",
+				Message: "Неверный формат кода",
+			}
+			// Отправляем ответ
+			err = json.NewEncoder(w).Encode(response)
+			if err != nil {
+				h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при отправке ответа после операции")
+
+				return
+			}
 
 			return
 		}
@@ -552,7 +641,6 @@ func EnterCodeFromPhone(redisClient *redis.Client, logger zerolog.Logger, ctx co
 
 		// Проверяем код
 		if phone.Reg_code == storedKesh.Code {
-			fmt.Println("Phone", storedKesh.Phone)
 			response = model.Response{
 				Status:  "success",
 				Data:    storedKesh.Phone,
@@ -571,7 +659,7 @@ func EnterCodeFromPhone(redisClient *redis.Client, logger zerolog.Logger, ctx co
 		// Отправляем ответ
 		err = json.NewEncoder(w).Encode(response)
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при отправке ответа")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при отправке ответа")
 
 			return
 		}
@@ -579,7 +667,50 @@ func EnterCodeFromPhone(redisClient *redis.Client, logger zerolog.Logger, ctx co
 	}
 }
 
-func SignupLegalEmail(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+func SignupLegalEmailCreater(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		op := "internal.services.user.EnterCodeFromEmailCreater"
+
+		// Попытка прочитать куку
+		token, err := r.Cookie("token")
+		if err != nil {
+			if err == http.ErrNoCookie {
+				logger.Err(err).Msg(" error in " + op + "; Кука не найдена")
+
+				return
+			}
+
+			logger.Err(err).Msg(" error in " + op + "; Проблема с чтением куки")
+
+			return
+		}
+
+		if token.Value == "" {
+			logger.Err(err).Msg(" error in " + op + "; Токен пуст")
+
+			return
+		}
+
+		token_flag, _, _ := jwt.IsAuthorized(token.Value)
+		if !token_flag {
+			logger.Err(err).Msg(" error in " + op + "; Неверный токен")
+
+			return
+		}
+
+		handler := &SignupHandler{
+			RedisClient: redisClient,
+			Logger:      logger,
+			JWT:         token.Value,
+		}
+
+		// 4) Вызываем дальше нужную логику: например, метод EnterCodeFromEmail
+		subHandler := handler.SignupLegalEmail(ctx, dbpool)
+		subHandler(w, r, ps) // передаём управление вашему вторичному хендлеру
+	}
+}
+
+func (h *SignupHandler) SignupLegalEmail(ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		op := "internal.services.user.SignupLegalEmail"
 		var user model.LegalUser
@@ -587,7 +718,7 @@ func SignupLegalEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		// Парсинг JSON-запроса
 		err := json.NewDecoder(r.Body).Decode(&user)
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при отправке ответа")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при отправке ответа")
 
 			return
 		}
@@ -595,35 +726,19 @@ func SignupLegalEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		flag := function.ValidatePassword(w, user.Password_hash)
 
 		if !flag {
-			logger.Err(err).Msg(" error in " + op + "; пароль не валиден")
-
-			return
-		}
-
-		// Попытка прочитать куку
-		token, err := r.Cookie("token")
-		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; ошибка чтения куки")
-
-			return
-		}
-
-		token_flag, _, _ := jwt.IsAuthorized(token.Value)
-
-		if !token_flag {
-			logger.Err(err).Msg(" error in " + op + "; JWT не валиден")
+			h.Logger.Err(err).Msg(" error in " + op + "; пароль не валиден")
 
 			return
 		}
 
 		// Получаем данные из Redis
-		keshData, err := redisClient.Get(ctx, token.Value).Result()
+		keshData, err := h.RedisClient.Get(ctx, h.JWT).Result()
 		if err == redis.Nil {
-			logger.Err(err).Msg(" error in " + op + "; Код не найден или истек")
+			h.Logger.Err(err).Msg(" error in " + op + "; Код не найден или истек")
 
 			return
 		} else if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
 
 			return
 		}
@@ -632,7 +747,7 @@ func SignupLegalEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		var storedKesh model.Email_kesh
 		err = json.Unmarshal([]byte(keshData), &storedKesh)
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
 
 			return
 		}
@@ -643,7 +758,7 @@ func SignupLegalEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 
 		err, image_flag, file_path := function.UploadAvatar(w, user.Avatar, pwd, strings.Split(storedKesh.Email, ".")[0], "ava")
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при добавлении аватарки")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при добавлении аватарки")
 
 			return
 		}
@@ -669,7 +784,50 @@ func SignupLegalEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 	}
 }
 
-func SignupLegalPhone(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+func SignupLegalPhoneCreater(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		op := "internal.services.user.EnterCodeFromEmailCreater"
+
+		// Попытка прочитать куку
+		token, err := r.Cookie("token")
+		if err != nil {
+			if err == http.ErrNoCookie {
+				logger.Err(err).Msg(" error in " + op + "; Кука не найдена")
+
+				return
+			}
+
+			logger.Err(err).Msg(" error in " + op + "; Проблема с чтением куки")
+
+			return
+		}
+
+		if token.Value == "" {
+			logger.Err(err).Msg(" error in " + op + "; Токен пуст")
+
+			return
+		}
+
+		token_flag, _, _ := jwt.IsAuthorized(token.Value)
+		if !token_flag {
+			logger.Err(err).Msg(" error in " + op + "; Неверный токен")
+
+			return
+		}
+
+		handler := &SignupHandler{
+			RedisClient: redisClient,
+			Logger:      logger,
+			JWT:         token.Value,
+		}
+
+		// 4) Вызываем дальше нужную логику: например, метод EnterCodeFromEmail
+		subHandler := handler.SignupLegalPhone(ctx, dbpool)
+		subHandler(w, r, ps) // передаём управление вашему вторичному хендлеру
+	}
+}
+
+func (h *SignupHandler) SignupLegalPhone(ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		op := "internal.services.user.SignupLegalPhone"
 
@@ -678,7 +836,7 @@ func SignupLegalPhone(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		// Парсинг JSON-запроса
 		err := json.NewDecoder(r.Body).Decode(&user)
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при парсинге JSON-запроса")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при парсинге JSON-запроса")
 
 			return
 		}
@@ -692,7 +850,7 @@ func SignupLegalPhone(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		// Попытка прочитать куку
 		token, err := r.Cookie("token")
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при попытке прочитать куку")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при попытке прочитать куку")
 
 			return
 		}
@@ -700,19 +858,19 @@ func SignupLegalPhone(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		token_flag, _, _ := jwt.IsAuthorized(token.Value)
 
 		if !token_flag {
-			logger.Err(err).Msg(" error in " + op + "; JWT невалиден")
+			h.Logger.Err(err).Msg(" error in " + op + "; JWT невалиден")
 
 			return
 		}
 
 		// Получаем данные из Redis
-		keshData, err := redisClient.Get(ctx, token.Value).Result()
+		keshData, err := h.RedisClient.Get(ctx, token.Value).Result()
 		if err == redis.Nil {
-			logger.Err(err).Msg(" error in " + op + "; Код не найден или истек")
+			h.Logger.Err(err).Msg(" error in " + op + "; Код не найден или истек")
 
 			return
 		} else if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
 
 			return
 		}
@@ -721,7 +879,7 @@ func SignupLegalPhone(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		var storedKesh model.Phone_kesh
 		err = json.Unmarshal([]byte(keshData), &storedKesh)
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
 
 			return
 		}
@@ -732,7 +890,7 @@ func SignupLegalPhone(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 
 		err, image_flag, file_path := function.UploadAvatar(w, user.Avatar, pwd, strings.Split(storedKesh.Phone, ".")[0], "ava")
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при добавлении аватара. Путь к файлу: " + file_path)
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при добавлении аватара. Путь к файлу: " + file_path)
 		}
 		if image_flag {
 			err = repo.SigLegalUserPhoneSQL(

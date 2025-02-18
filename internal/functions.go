@@ -182,8 +182,6 @@ func UploadAvatar(rw http.ResponseWriter, imageBase64, directory, user_id, index
 		return err, false, ""
 	}
 
-	fmt.Println("Decoded data length:", len(data))
-
 	// Генерируем уникальное имя файла
 	fileName := GenerateFileName("png", user_id, index)
 
@@ -199,8 +197,6 @@ func UploadAvatar(rw http.ResponseWriter, imageBase64, directory, user_id, index
 		}
 	}
 
-	// Создаем файл на сервере для сохранения декодированного файла
-	fmt.Println("Creating file at path:", filePath)
 	dst, err := os.Create(filePath) // Используем безопасное имя файла
 	if err != nil {
 		http.Error(rw, fmt.Sprintf("Error creating file %s: %v", filePath, err), http.StatusInternalServerError)
@@ -209,13 +205,10 @@ func UploadAvatar(rw http.ResponseWriter, imageBase64, directory, user_id, index
 	defer dst.Close()
 
 	// Записываем данные в файл
-	fmt.Println("Writing data to file")
 	if _, err := dst.Write(data); err != nil {
 		http.Error(rw, fmt.Sprintf("Error writing to file %s: %v", fileName, err), http.StatusInternalServerError)
 		return err, false, ""
 	}
-
-	fmt.Println("File successfully created at:", filePath)
 
 	return nil, true, filePath
 }

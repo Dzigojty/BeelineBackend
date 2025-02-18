@@ -65,7 +65,7 @@ func main() {
 	// этап проверки тестов и их вывод
 	fmt.Println("Запуск тестов...")
 
-	cmd := exec.Command("go", "test", "./internal/services/user/test/signupUser_test.go", "-v")
+	cmd := exec.Command("go", "test", "./internal/services/user/test/...", "-v")
 	cmd.Stdout = os.Stdout // Направляем вывод в стандартный поток
 	cmd.Stderr = os.Stderr // Направляем ошибки в стандартный поток
 
