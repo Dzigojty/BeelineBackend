@@ -2,6 +2,9 @@ package model
 
 import "github.com/jackc/pgtype"
 
+type User_id struct {
+	User_id int `json:"user_id"`
+}
 type Owner_id struct {
 	Owner_id int `json:"owner_id"`
 }

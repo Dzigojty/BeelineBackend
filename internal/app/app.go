@@ -211,6 +211,7 @@ func (application *MyApp) Routes(r *httprouter.Router, Ctx context.Context, dbpo
 	r.GET("/favProfilsFirstOld", user.FavProfilsFirstOld(rdb, logger, Ctx, dbpool))     //групировка профиля
 	r.GET("/favProfilsFirstCheap", user.FavProfilsFirstCheap(rdb, logger, Ctx, dbpool)) //групировка профиля
 	r.GET("/favProfilsFirstDearl", user.FavProfilsFirstDearl(rdb, logger, Ctx, dbpool)) //групировка профиля
+	r.POST("/openUserProfile", user.OpenUserProfile(rdb, logger, Ctx, dbpool))          //открываем чужой профиль
 
 	// схема login
 	r.POST("/loginYandex", login.LoginYandex(rdb, logger, Ctx, dbpool))                                                   // Это используется при нажатии кнопки "Авторизироватьяс через Яндекс"
@@ -252,6 +253,7 @@ func (application *MyApp) Routes(r *httprouter.Router, Ctx context.Context, dbpo
 	r.GET("/groupAdsByArchived", ads.GroupAdsByArchived(rdb, logger, Ctx, dbpool))                //вывод объявлений по хозяину(неактивный)
 	r.POST("/allUserAds", ads.AllUserAds(rdb, logger, Ctx, dbpool))                               //Кнопка 11 объявлений пользователя
 	r.POST("/allAdsOfThisUser", ads.AllAdsOfThisUser(rdb, logger, Ctx, dbpool))                   //все объявления этого юзера
+	r.POST("/listOfUserAds", ads.ListOfUserAds(rdb, logger, Ctx, dbpool))                         //все объявления этого юзера(неавторизованного)
 
 	// схема chat
 	r.POST("/chatButtonInAds", chat.ChatButtonInAds(rdb, logger, Ctx, dbpool))                      //кнопка "написать" в листе объявления

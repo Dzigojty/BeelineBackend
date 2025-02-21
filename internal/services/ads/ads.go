@@ -854,3 +854,24 @@ func AllAdsOfThisUser(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		}
 	}
 }
+
+func ListOfUserAds(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		op := "internal.services.ads.AllUserAds"
+
+		var owner_id model.Owner_id
+
+		// Парсинг JSON-запроса
+		err := json.NewDecoder(r.Body).Decode(&owner_id)
+		if err != nil {
+			logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с парсингом JSON-запроса", op))
+		}
+
+		repo := database.NewRepo(ctx, dbpool)
+
+		err = repo.ListOfUserAdsSQL(ctx, w, dbpool, r, owner_id.Owner_id)
+		if err != nil {
+			logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с процедурой AllUserAdsSQL", op))
+		}
+	}
+}

@@ -309,7 +309,7 @@ func (h *SignupHandler) SignupUserByPhone(logger zerolog.Logger, ctx context.Con
 		writer.WriteField("phone_suffix", strconv.Itoa(h.CodeNum))
 
 		// Закрытие writer (важно!)
-		writer.Close()
+		defer writer.Close()
 
 		// Создание HTTP-запроса
 		req, err := http.NewRequest("POST", h.RequestURL, &requestBody)
@@ -1948,6 +1948,32 @@ func FavProfilsFirstDearl(redisClient *redis.Client, logger zerolog.Logger, ctx 
 
 		if err != nil {
 
+		}
+	}
+}
+
+func OpenUserProfile(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		op := "internal.services.user.FavProfilsFirstDearl"
+
+		var user model.User_id
+
+		repo := database.NewRepo(ctx, dbpool)
+
+		// Парсинг JSON-запроса
+		err := json.NewDecoder(r.Body).Decode(&user)
+		if err != nil {
+			logger.Err(err).Msg(" error in " + op + "; Ошибка при парсинге JSON-запроса")
+
+			return
+		}
+
+		err = repo.OpenUserProfileSQL(ctx, w, dbpool, r, user.User_id)
+
+		if err != nil {
+			logger.Err(err).Msg("Error in " + op + "; Ошибка в хендлере")
+
+			return
 		}
 	}
 }
