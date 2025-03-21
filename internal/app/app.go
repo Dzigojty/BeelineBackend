@@ -121,7 +121,7 @@ func handleTextMessage() httprouter.Handle {
 
 func (application *MyApp) Routes(r *httprouter.Router, Ctx context.Context, dbpool *pgxpool.Pool, rdb *redis.Client, logger zerolog.Logger) {
 	//WebSocket-соединения
-	r.GET("/handleWebSocket", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
+	r.GET("/ws/handleWebSocket", func(rw http.ResponseWriter, r *http.Request, p httprouter.Params) {
 		// Извлечение токена JWT из query параметра
 		token := r.URL.Query().Get("token")
 
@@ -195,8 +195,8 @@ func (application *MyApp) Routes(r *httprouter.Router, Ctx context.Context, dbpo
 	r.POST("/signupLegalEmail", user.SignupLegalEmailCreater(rdb, logger, Ctx, dbpool)) //передача данных Юридического лица (регистрация) Email
 	r.POST("/signupLegalPhone", user.SignupLegalPhoneCreater(rdb, logger, Ctx, dbpool)) //передача данных Юридического лица (регистрация) Photo
 	// signupNatur_test
-	r.POST("/signupNaturEmail", user.SignupNaturEmail(rdb, logger, Ctx, dbpool)) //передача данных Физического лица (регистрация) Email
-	r.POST("/signupNaturPhone", user.SignupNaturPhone(rdb, logger, Ctx, dbpool)) //передача данных Физического лица (регистрация) Email
+	r.POST("/signupNaturEmail", user.SignupNaturEmailCreater(rdb, logger, Ctx, dbpool)) //передача данных Физического лица (регистрация) Email
+	r.POST("/signupNaturPhone", user.SignupNaturPhone(rdb, logger, Ctx, dbpool))        //передача данных Физического лица (регистрация) Email
 	// editingUser_test
 	r.POST("/editingLegalUserData", user.EditingLegalUserData(rdb, logger, Ctx, dbpool)) //изменение данных для юрика
 	r.POST("/editingNaturUserData", user.EditingNaturUserData(rdb, logger, Ctx, dbpool)) //изменение данных для физика
@@ -214,23 +214,27 @@ func (application *MyApp) Routes(r *httprouter.Router, Ctx context.Context, dbpo
 	r.POST("/openUserProfile", user.OpenUserProfile(rdb, logger, Ctx, dbpool))          //открываем чужой профиль
 
 	// схема login
-	r.POST("/loginYandex", login.LoginYandex(rdb, logger, Ctx, dbpool))                                                   // Это используется при нажатии кнопки "Авторизироватьяс через Яндекс"
-	r.POST("/callback", login.Callback(rdb, logger, Ctx, dbpool))                                                         // Обработка обратного вызова авторизации через Яндекс, если она прошла успешно
-	r.POST("/login", login.Login(rdb, logger, Ctx, dbpool))                                                               //логин отправка
-	r.POST("/RecoveryPasswdEmail", login.RecoveryPasswdEmail(rdb, logger, Ctx, dbpool))                                   //восстановление пароля
-	r.POST("/recoveryPasswdPhone", login.RecoveryPasswdPhone(rdb, logger, Ctx, dbpool))                                   //восстановление пароля
+	r.POST("/loginYandex", login.LoginYandex(rdb, logger, Ctx, dbpool))                 // Это используется при нажатии кнопки "Авторизироватьяс через Яндекс"
+	r.POST("/callback", login.Callback(rdb, logger, Ctx, dbpool))                       // Обработка обратного вызова авторизации через Яндекс, если она прошла успешно
+	r.POST("/login", login.Login(rdb, logger, Ctx, dbpool))                             //логин отправка
+	r.POST("/RecoveryPasswdEmail", login.RecoveryPasswdEmail(rdb, logger, Ctx, dbpool)) //восстановление пароля
+	r.POST("/recoveryPasswdPhone", login.RecoveryPasswdPhone(rdb, logger, Ctx, dbpool)) //восстановление пароля
+	r.POST("/recoveryPasswdCode", login.RecoveryPasswdCode(rdb, logger, Ctx, dbpool))   //авторизованное восстановление пароля через телефон
+
 	r.POST("/enterCodeForRecoveryPassWithEmail", login.EnterCodeForRecoveryPassWithEmail(rdb, logger, Ctx, dbpool))       //восстановление пароля через почту(отправление на почту)
 	r.POST("/sendCodeForRecoveryPassWithEmail", login.SendCodeForRecoveryPassWithEmail(rdb, logger, Ctx, dbpool))         //восстановление пароля через почту
 	r.POST("/enterCodeForRecoveryPassWithPhoneNum", login.EnterCodeForRecoveryPassWithPhoneNum(rdb, logger, Ctx, dbpool)) //восстановление пароля через телефон
 	r.POST("/sendCodeForRecoveryPassWithPhoneNum", login.SendCodeForRecoveryPassWithPhoneNum(rdb, logger, Ctx, dbpool))   //восстановление пароля через телефон
-	r.POST("/recoveryPass", login.RecoveryPass(rdb, logger, Ctx, dbpool))                                                 //авторизованное восстановление пароля через телефон
-	r.POST("/autorizLoginEmailSend", login.AutorizLoginEmailSend(rdb, logger, Ctx, dbpool))                               //логин отправка
-	r.POST("/autorizLoginEmailEnter", login.AutorizLoginEmailEnter(rdb, logger, Ctx, dbpool))                             //логин ввод
-	r.GET("/refreshToken", login.RefreshToken(rdb, logger, Ctx, dbpool))                                                  //рефреш токены
-	r.POST("/sendCode", login.SendCode(rdb, logger, Ctx, dbpool))                                                         //вводим код
-	r.POST("/enterPasswd", login.EnterPasswd(rdb, logger, Ctx, dbpool))                                                   //вводим код
-	r.POST("/addAddress", login.AddAddress(rdb, logger, Ctx, dbpool))                                                     // добавляем адрес
-	r.GET("/giveAddress", login.GiveAddress(rdb, logger, Ctx, dbpool))                                                    // смотрим
+
+	r.POST("/recoveryPass", login.RecoveryPass(rdb, logger, Ctx, dbpool)) //авторизованное восстановление пароля через телефон
+
+	r.POST("/autorizLoginEmailSend", login.AutorizLoginEmailSend(rdb, logger, Ctx, dbpool))   //логин отправка
+	r.POST("/autorizLoginEmailEnter", login.AutorizLoginEmailEnter(rdb, logger, Ctx, dbpool)) //логин ввод
+	r.GET("/refreshToken", login.RefreshToken(rdb, logger, Ctx, dbpool))                      //рефреш токены
+	r.POST("/sendCode", login.SendCode(rdb, logger, Ctx, dbpool))                             //вводим код
+	r.POST("/enterPasswd", login.EnterPasswd(rdb, logger, Ctx, dbpool))                       //вводим код
+	r.POST("/addAddress", login.AddAddress(rdb, logger, Ctx, dbpool))                         // добавляем адрес
+	r.GET("/giveAddress", login.GiveAddress(rdb, logger, Ctx, dbpool))                        // смотрим
 
 	// схема ads
 	r.POST("/productList", ads.ProductList(rdb, logger, Ctx, dbpool))                             //
@@ -299,6 +303,8 @@ func (application *MyApp) Routes(r *httprouter.Router, Ctx context.Context, dbpo
 	r.GET("/groupOrdersByRented", order.GroupOrdersByRented(rdb, logger, Ctx, dbpool))       //группировка заказов по активным
 	r.GET("/groupOrdersByUnRented", order.GroupOrdersByUnRented(rdb, logger, Ctx, dbpool))   //группировка заказов по неактивным
 	r.POST("/complBooking", order.ComplBooking(rdb, logger, Ctx, dbpool))                    //бронирование прошло успешно и мы начисляем бабки юзеру
-	r.GET("/bookingList", order.BookingList(rdb, logger, Ctx, dbpool))                       // лист бронирования
-	r.GET("/sigPDFfile", order.SigPDFfile(rdb, logger, Ctx, dbpool))                         // лист бронирования
+	r.GET("/bookingList", order.BookingList(rdb, logger, Ctx, dbpool))                       //лист бронирования
+	r.GET("/sigPDFfile", order.SigPDFfile(rdb, logger, Ctx, dbpool))                         //лист бронирования
+	// r.POST("/completBookingOutput", order.CompletBookingOutput(rdb, logger, Ctx, dbpool, connections)) //кто-то прислал нам запрос на завершение
+	// r.POST("/completBookingInput", order.CompletBookingInput(rdb, logger, Ctx, dbpool, connections))   //я прислал запрос на завершение
 }

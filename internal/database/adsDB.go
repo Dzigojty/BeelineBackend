@@ -2790,6 +2790,8 @@ func (repo *MyRepository) SigFavAdsSQL(ctx context.Context, rep *pgxpool.Pool, r
 		}
 	}
 
+	fmt.Println("ad_id = ", ad_id)
+
 	type Response struct {
 		Status  string `json:"status"`
 		Data    int    `json:"data,omitempty"`

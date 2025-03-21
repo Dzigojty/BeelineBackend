@@ -314,12 +314,12 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 		company_user AS (
 			SELECT user_id, name_of_company 
 			FROM users.company_user 
-			WHERE user_id = (SELECT sender_id FROM i LIMIT 1)
+			WHERE user_id IN (SELECT sender_id FROM i)
 		),
 		individual_user AS (
 			SELECT user_id, name 
 			FROM users.individual_user 
-			WHERE user_id = (SELECT sender_id FROM i LIMIT 1)
+			WHERE user_id IN (SELECT sender_id FROM i)
 		),
 		chat_info AS (
 			SELECT user_1_id, user_2_id, ad_id, have_disput, mediator_id FROM  chat.chats WHERE chats.id = $1
@@ -334,11 +334,17 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 			SELECT global_rate FROM finance.bidding WHERE bidding.ads_id = (SELECT ad_id FROM i) AND renter_id = $2 AND end_at > NOW()
 			ORDER BY id desc
 			LIMIT 1
+		),
+		mediator_info AS (
+			SELECT name, surname, patronymic FROM users.individual_user WHERE user_id = (SELECT mediator_id FROM chat_info)
 		)
 		SELECT
+			COALESCE((SELECT COALESCE(individual_user.name, company_user.name_of_company) WHERE COALESCE(individual_user.user_id, company_user.user_id) != $2), 'наше имя') AS buddy_name,
 			(SELECT ad_id FROM chat_info) AS ads_id,
 			(SELECT have_disput FROM chat_info) AS disput_state,
-			COALESCE((SELECT mediator_id FROM chat_info), 0) AS mediator_id,
+			COALESCE((SELECT name FROM mediator_info), 'Нет имени'),
+			COALESCE((SELECT surname FROM mediator_info), 'Нет фамилии'),
+			COALESCE((SELECT patronymic FROM mediator_info), 'Нет отчества'),
 			COALESCE((SELECT user_1_id FROM chat_info WHERE user_1_id != (SELECT owner_id FROM ownerr)),
 				(SELECT user_2_id FROM chat_info WHERE user_2_id != (SELECT owner_id FROM ownerr))) AS slsve_id,
 			(SELECT owner_id FROM ownerr),
@@ -346,7 +352,7 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 
 			i.id AS message_id,
 			i.sender_id AS user_id,
-			COALESCE(individual_user.name, 'company_user.name_of_company') AS name,
+			COALESCE(individual_user.name, company_user.name_of_company) AS name,
 			i.text,
 			i.sent_at,
 			j.path_to_file,
@@ -364,18 +370,24 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 	)
 	errorr(err)
 
+	var buddyName string
 	var ads_id int
 	var disput_state bool
-	var mediator_id int
+	var mediator_name string
+	var mediator_surname string
+	var mediator_patronymic string
 	var slave_id int
 	var owner_id int
 	var global_rate int
 
 	for request_2.Next() {
 		err := request_2.Scan(
+			&buddyName,
 			&ads_id,
 			&disput_state,
-			&mediator_id,
+			&mediator_name,
+			&mediator_surname,
+			&mediator_patronymic,
 			&slave_id,
 			&owner_id,
 			&global_rate,
@@ -398,15 +410,18 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 	}
 
 	type Response struct {
-		Status       string         `json:"status"`
-		Ads_id       int            `json:"ads_id"`
-		Disput_state bool           `json:"disput_state"`
-		Mediator_id  int            `json:"moderator_id"`
-		Slave_id     int            `json:"slave_id"`
-		Owner_id     int            `json:"owner_id"`
-		Global_rate  int            `json:"global_rate"`
-		Data         []Product_user `json:"data,omitempty"`
-		Message      string         `json:"message"`
+		Status              string         `json:"status"`
+		BuddyName           string         `json:"buddyName"`
+		Ads_id              int            `json:"ads_id"`
+		Disput_state        bool           `json:"disput_state"`
+		Mediator_name       string         `json:"mediator_name"`
+		Mediator_surname    string         `json:"mediator_surname"`
+		Mediator_patronymic string         `json:"mediator_patronymic"`
+		Slave_id            int            `json:"slave_id"`
+		Owner_id            int            `json:"owner_id"`
+		Global_rate         int            `json:"global_rate"`
+		Data                []Product_user `json:"data,omitempty"`
+		Message             string         `json:"message"`
 	}
 
 	if err == nil && (Products_user_mass != nil) {
@@ -420,15 +435,18 @@ func (repo *MyRepository) OpenChatSQL(ctx context.Context, rw http.ResponseWrite
 		}
 
 		response := Response{
-			Status:       "success",
-			Ads_id:       ads_id,
-			Disput_state: disput_state,
-			Mediator_id:  mediator_id,
-			Slave_id:     slave_id,
-			Owner_id:     owner_id,
-			Global_rate:  global_rate,
-			Data:         Products_user_mass,
-			Message:      "Показано",
+			Status:              "success",
+			BuddyName:           buddyName,
+			Ads_id:              ads_id,
+			Disput_state:        disput_state,
+			Mediator_name:       mediator_name,
+			Mediator_surname:    mediator_surname,
+			Mediator_patronymic: mediator_patronymic,
+			Slave_id:            slave_id,
+			Owner_id:            owner_id,
+			Global_rate:         global_rate,
+			Data:                Products_user_mass,
+			Message:             "Показано",
 		}
 
 		rw.WriteHeader(http.StatusOK)

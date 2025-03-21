@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"myproject/internal/database"
+	"myproject/internal/model"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 )
 
 // Структура тестов
-type signupCase struct {
+type signupLegalCase struct {
 	name          string
 	email         string
 	phone         string
@@ -25,34 +26,33 @@ type signupCase struct {
 	message       string
 }
 
-var signupCases = []signupCase{
-	{"Valid data1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
-	{"Valid data2", "", "+7(928)074-32-44", 2, "23202004aA/", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
+var signupLegalCases = []signupLegalCase{
+	{"Valid data1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "The user has been successfully registered"},
+	{"Valid data2", "", "+7(928)074-32-44", 2, "23202004aA/", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "The user has been successfully registered"},
 
-	{"Invalid data1", "", "", 4, "23202004aA/", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
-	{"Invalid data2", "", "", 5, "23202004aA/", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
+	{"Invalid data1", "", "", 1, "23202004aA/", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Передаёшь пустое значение"},
+	{"Invalid data2", "", "", 2, "23202004aA/", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Передаёшь пустое значение"},
 
-	{"Invalid password1", "test.octa.one@gagarin.com", "", 1, "x", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
-	{"Invalid password2", "", "+7(928)074-32-44", 2, "x", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
+	{"Invalid password1", "test.octa.one@gagarin.com", "", 1, "x", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "длина пароля должна быть не менее 8 символов"},
+	{"Invalid password2", "", "+7(928)074-32-44", 2, "x", 123456, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "длина пароля должна быть не менее 8 символов"},
 
-	{"Invalid indNum1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 0, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
-	{"Invalid indNum2", "", "+7(928)074-32-44", 2, "23202004aA/", 0, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
+	{"Invalid indNum1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 0, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Передаёшь пустое значение"},
+	{"Invalid indNum2", "", "+7(928)074-32-44", 2, "23202004aA/", 0, "OOO.MyCompany", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Передаёшь пустое значение"},
 
-	{"Invalid nameOfCompany1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 123456, "", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
-	{"Invalid nameOfCompany2", "", "+7(928)074-32-44", 2, "23202004aA/", 123456, "", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
+	{"Invalid nameOfCompany1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 123456, "", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Передаёшь пустое значение"},
+	{"Invalid nameOfCompany2", "", "+7(928)074-32-44", 2, "23202004aA/", 123456, "", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Передаёшь пустое значение"},
 
-	{"Invalid addressName1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 123456, "OOO.MyCompany", "", phocoCase, "Код принят"},
-	{"Invalid addressName2", "", "+7(928)074-32-44", 2, "23202004aA/", 123456, "OOO.MyCompany", "", phocoCase, "Код принят"},
+	{"Invalid addressName1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 123456, "OOO.MyCompany", "", phocoCase, "Передаёшь пустое значение"},
+	{"Invalid addressName2", "", "+7(928)074-32-44", 2, "23202004aA/", 123456, "OOO.MyCompany", "", phocoCase, "Передаёшь пустое значение"},
 
-	{"Invalid Redis data1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 123456, "OOO.MyCompan", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
-	{"Invalid Redis data2", "", "+7(928)074-32-44", 2, "23202004aA/", 123456, "OOO.MyCompan", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "Код принят"},
+	{"Invalid Redis data1", "test.octa.one@gagarin.com", "", 1, "23202004aA/", 123456, "OOO.MyCompan", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "The user has been successfully registered"},
+	{"Invalid Redis data2", "", "+7(928)074-32-44", 2, "23202004aA/", 123456, "OOO.MyCompan", "Россия, РСО-Алания, г.Владикавказ, ул. Весенняя 7д", phocoCase, "The user has been successfully registered"},
 }
 
-// TODO задать мыло
 func TestSignupLegalHandler(t *testing.T) {
 	ctx := context.Background()
 
-	for _, tc := range signupCases {
+	for _, tc := range signupLegalCases {
 		t.Run(tc.name, func(t *testing.T) {
 			handler, mock, _ := setupRedisMok()
 
@@ -65,16 +65,15 @@ func TestSignupLegalHandler(t *testing.T) {
 			})
 
 			if tc.typee == 1 {
-				type Kesh struct {
-					Email string `json:"Email"`
-					Code  int    `json:"Code"`
-				}
-
-				keshData, _ := json.Marshal(Kesh{Email: tc.email, Code: 0})
+				keshData, _ := json.Marshal(model.Email_kesh{Email: tc.email, Code: 0})
 
 				// Ожидаем, что в Redis будет сделана запись с этим ключом
 				mock.MatchExpectationsInOrder(false)
+				// Сначала записываем данные в Redis (чтобы они там были)
 				mock.ExpectSet(handler.JWT, string(keshData), 40*time.Minute).SetVal("OK")
+
+				// Затем эмулируем их чтение
+				mock.ExpectGet(handler.JWT).SetVal(string(keshData))
 
 				// Инициализация подключения к базе данных
 				dbpool, err := database.InitMockDBConn(ctx)
@@ -132,46 +131,72 @@ func TestSignupLegalHandler(t *testing.T) {
 				return
 			}
 
-			// if tc.typee == 4 {
-			// 	// Данные для Redis
-			// 	keshData, _ := json.Marshal(map[string]interface{}{
-			// 		"Email": "тут типо нет почты",
-			// 	})
-			// 	// Настраиваем Redis мок
-			// 	mock.MatchExpectationsInOrder(false)
-			// 	mock.ExpectGet(handler.JWT).SetVal(string(keshData))
+			if tc.typee == 2 {
+				keshData, _ := json.Marshal(model.Phone_kesh{Phone: tc.phone, Code: 0})
 
-			// 	handlerFunc := handler.SignupLegalEmail(ctx)
-			// 	testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(handlerPlayload), tc.message, "/signupLegalEmail")
+				// Ожидаем, что в Redis будет сделана запись с этим ключом
+				mock.MatchExpectationsInOrder(false)
+				// Сначала записываем данные в Redis (чтобы они там были)
+				mock.ExpectSet(handler.JWT, string(keshData), 40*time.Minute).SetVal("OK")
 
-			// 	return
-			// }
+				// Затем эмулируем их чтение
+				mock.ExpectGet(handler.JWT).SetVal(string(keshData))
 
-			// if tc.typee == 5 {
-			// 	// Данные для Redis
-			// 	keshData, _ := json.Marshal(map[string]interface{}{
-			// 		"phone_number": "тут типо нет телефона",
-			// 	})
-			// 	// Настраиваем Redis мок
-			// 	mock.MatchExpectationsInOrder(false)
-			// 	mock.ExpectGet(handler.JWT).SetVal(string(keshData))
+				// Инициализация подключения к базе данных
+				dbpool, err := database.InitMockDBConn(ctx)
+				if err != nil {
+					log.Fatalf("%v failed to init DB connection", err)
+				}
+				defer dbpool.Close()
 
-			// 	handlerFunc := handler.SignupLegalPhone(ctx)
-			// 	testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(handlerPlayload), tc.message, "/signupLegalPhone")
+				_, err = dbpool.Exec(ctx, `DELETE FROM finance.wallets;`)
+				if err != nil {
+					log.Fatal(fmt.Sprintf("Error in SignupLegal test; Ошибка при очистке БД перед тестом: %s", err))
 
-			// 	return
-			// }
+					return
+				}
 
-			// // Данные для Redis
-			// keshData, _ := json.Marshal(map[string]interface{}{
-			// 	"phone_number": tc.phone,
-			// })
-			// // Настраиваем Redis мок
-			// mock.MatchExpectationsInOrder(false)
-			// mock.ExpectGet(handler.JWT).SetVal(string(keshData))
+				_, err = dbpool.Exec(ctx, `DELETE FROM users.company_user;`)
+				if err != nil {
+					log.Fatal(fmt.Sprintf("Error in SignupLegal test; Ошибка при очистке БД перед тестом: %s", err))
 
-			// handlerFunc := handler.SignupLegalPhone(ctx)
-			// testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(handlerPlayload), tc.message, "/signupLegalPhone")
+					return
+				}
+
+				_, err = dbpool.Exec(ctx, `DELETE FROM users.users;`)
+				if err != nil {
+					log.Fatal(fmt.Sprintf("Error in SignupLegal test; Ошибка при очистке БД перед тестом: %s", err))
+
+					return
+				}
+
+				// Теперь создаём сам хендлер, передавая мок
+				handlerFunc := handler.SignupLegalPhone(ctx, dbpool)
+				testRequest(t, httprouterAdapterEnterCod(handlerFunc), string(handlerPlayload), tc.message, "/signupLegalPhone")
+
+				_, err = dbpool.Exec(ctx, `DELETE FROM finance.wallets;`)
+				if err != nil {
+					log.Fatal(fmt.Sprintf("Error in SignupLegal test; Ошибка при очистке БД перед тестом: %s", err))
+
+					return
+				}
+
+				_, err = dbpool.Exec(ctx, `DELETE FROM users.company_user;`)
+				if err != nil {
+					log.Fatal(fmt.Sprintf("Error in SignupLegal test; Ошибка при очистке БД перед тестом: %s", err))
+
+					return
+				}
+
+				_, err = dbpool.Exec(ctx, `DELETE FROM users.users;`)
+				if err != nil {
+					log.Fatal(fmt.Sprintf("Error in SignupLegal test; Ошибка при очистке БД перед тестом: %s", err))
+
+					return
+				}
+
+				return
+			}
 		})
 	}
 }

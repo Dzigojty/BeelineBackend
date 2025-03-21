@@ -56,7 +56,7 @@ func setupRedisMok() (*user.SignupHandler, redismock.ClientMock, zerolog.Logger)
 		RedisClient: db, // Заменили реальный Redis
 		Logger:      logger,
 		CodeNum:     1234,
-		JWT:         "true_jwt",
+		JWT:         "true.jwt",
 	}
 	return handlerData, mock, logger
 }

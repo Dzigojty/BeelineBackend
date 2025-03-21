@@ -1302,3 +1302,33 @@ func (repo *MyRepository) SigPDFfileSQL(ctx context.Context, rw http.ResponseWri
 
 	return err
 }
+
+// func (repo *MyRepository) CompletBookingOutputSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, order_id, user_id int) (err error) {
+// 	request, err := rep.Query( //это запрос на вывод сообщений нашего кента
+// 		ctx,
+// 		`
+// 		проверяем, наше ли это и возвращаем его
+// 		`,
+
+// 		order_id,
+// 		user_id,
+// 	)
+// 	errorr(err)
+
+// 	for request.Next() {
+// 		err := request.Scan(&sent_at)
+
+// 		if err != nil {
+// 			fmt.Println(err)
+
+// 			continue
+// 		}
+// 	}
+
+// 	Notification(ctx, buddy_id, conn[buddy_id], "message", id_chat, mess_id, "image", sent_at, id_user, user_role, ServeSpecificMediaBase64(rw, r, avatar_path), name, rdb)
+
+// 	rw.WriteHeader(http.StatusOK)
+// 	json.NewEncoder(rw).Encode(response)
+
+// 	return err
+// }

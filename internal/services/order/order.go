@@ -42,6 +42,55 @@ func RegOrderHourly(redisClient *redis.Client, logger zerolog.Logger, ctx contex
 		} else {
 			flag, user_id, user_role := jwt.IsAuthorized(token.Value)
 
+			//проверка средств и отслеживание пополнения
+			request, err := dbpool.Query(
+				ctx,
+				`
+				WITH wallet AS (
+					SELECT total_balance FROM finance.wallets WHERE user_id = $1
+				),
+				owner AS (
+					SELECT owner_id, hourly_rate FROM ads.ads WHERE id = $2
+				)
+				SELECT (SELECT total_balance FROM wallet) >= (SELECT $3::timestamp::date - $4::timestamp::date) * 
+					(SELECT hourly_rate FROM owner) AS summ_of_money
+				`,
+
+				user_id,
+				booking.Ads_id,
+				booking.Ends_at,
+				booking.Ads_id,
+			)
+
+			var summOfMoney bool
+
+			for request.Next() {
+				err := request.Scan(&summOfMoney)
+
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
+			}
+
+			type Response struct {
+				Status  string `json:"status"`
+				Data    string `json:"data,omitempty"`
+				Message string `json:"message"`
+			}
+
+			if !summOfMoney {
+				response := Response{
+					Status:  "fatal",
+					Data:    "key:" + time.Now().Format("020106"),
+					Message: "Сведств недостаточно, пополните счёт на необходимую сумму",
+				}
+
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+
 			if flag && user_role == 1 {
 				err = repo.RegOrderHourlySQL(ctx, w, dbpool, r, redisClient, сonnection, user_id, booking.Ads_id, time.Unix(booking.Starts_at, 0).UTC(), time.Unix(booking.Ends_at, 0).UTC(), booking.PositionX, booking.PositionY)
 				if err != nil {
@@ -76,6 +125,55 @@ func RegOrderDaily(redisClient *redis.Client, logger zerolog.Logger, ctx context
 			logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с попыткой прочитать JWT", op))
 		}
 		flag, user_id, user_role := jwt.IsAuthorized(token.Value)
+
+		//проверка средств и отслеживание пополнения
+		request, err := dbpool.Query(
+			ctx,
+			`
+			WITH wallet AS (
+				SELECT total_balance FROM finance.wallets WHERE user_id = $1
+			),
+			owner AS (
+				SELECT owner_id, daily_rate FROM ads.ads WHERE id = $2
+			)
+			SELECT (SELECT total_balance FROM wallet) >= (SELECT $3::timestamp::date - $4::timestamp::date) * 
+				(SELECT daily_rate FROM owner) AS summ_of_money
+			`,
+
+			user_id,
+			booking.Ads_id,
+			booking.Ends_at,
+			booking.Ads_id,
+		)
+
+		var summOfMoney bool
+
+		for request.Next() {
+			err := request.Scan(&summOfMoney)
+
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+		}
+
+		type Response struct {
+			Status  string `json:"status"`
+			Data    string `json:"data,omitempty"`
+			Message string `json:"message"`
+		}
+
+		if !summOfMoney {
+			response := Response{
+				Status:  "fatal",
+				Data:    "key:" + time.Now().Format("020106"),
+				Message: "Сведств недостаточно, пополните счёт на необходимую сумму",
+			}
+
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
 
 		if user_role != 1 {
 			response := model.Response{
@@ -266,6 +364,49 @@ func RegOrderBidding(redisClient *redis.Client, logger zerolog.Logger, ctx conte
 
 		flag, user_id, user_role := jwt.IsAuthorized(token.Value)
 
+		//проверка средств и отслеживание пополнения
+		request, err := dbpool.Query(
+			ctx,
+			`
+			WITH wallet AS (
+				SELECT total_balance FROM finance.wallets WHERE user_id = $1
+			)
+			SELECT (SELECT total_balance FROM wallet) >= $2 AS summ_of_money
+			`,
+
+			user_id,
+			bidding.Global_rate,
+		)
+
+		var summOfMoney bool
+
+		for request.Next() {
+			err := request.Scan(&summOfMoney)
+
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+		}
+
+		type Response struct {
+			Status  string `json:"status"`
+			Data    string `json:"data,omitempty"`
+			Message string `json:"message"`
+		}
+
+		if !summOfMoney {
+			response := Response{
+				Status:  "fatal",
+				Data:    "key:" + time.Now().Format("020106"),
+				Message: "Сведств недостаточно, пополните счёт на необходимую сумму",
+			}
+
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
 		if user_role != 1 {
 			response := model.Response{
 				Status:  "fatal",
@@ -435,3 +576,52 @@ func SigPDFfile(redisClient *redis.Client, logger zerolog.Logger, ctx context.Co
 		}
 	}
 }
+
+// func CompletBookingOutput(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool, conn map[int]*websocket.Conn) httprouter.Handle {
+// 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+// 		op := "internal.services.order.CompletBookingOutput"
+
+// 		repo := database.NewRepo(ctx, dbpool)
+
+// 		token, err := r.Cookie("token")
+// 		if err != nil {
+// 			logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с попыткой прочитать куку", op))
+// 		}
+
+// 		flag, user_id, user_role := jwt.IsAuthorized(token.Value)
+// 		if user_role != 1 {
+// 			response := model.Response{
+// 				Status:  "fatal",
+// 				Message: "У вас нет доступа на эту операцию",
+// 			}
+
+// 			json.NewEncoder(w).Encode(response)
+
+// 			return
+// 		}
+
+// 		if !flag {
+// 			response := model.Response{
+// 				Status:  "fatal",
+// 				Message: "Что-то не так с JWT",
+// 			}
+
+// 			json.NewEncoder(w).Encode(response)
+
+// 			return
+// 		}
+
+// 		var coplBooking model.Owner_id
+
+// 		// Парсинг JSON-запроса
+// 		err = json.NewDecoder(r.Body).Decode(&coplBooking)
+// 		if err != nil {
+// 			logger.Err(err).Msg(fmt.Sprintf("error in ", op, "; ошибка с парсингом JSON-запроса"))
+// 		}
+
+// 		err = repo.CompletBookingOutputSQL(ctx, w, dbpool, coplBooking.Owner_id, user_id)
+// 		if err != nil {
+// 			logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с процедурой BookingListSQL", op))
+// 		}
+// 	}
+// }

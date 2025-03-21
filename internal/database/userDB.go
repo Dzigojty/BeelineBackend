@@ -243,24 +243,11 @@ func errorr(err error) {
 	}
 }
 
-func (repo *MyRepository) SigLegalUserEmailSQL(
-	ctx context.Context,
-	rep *pgxpool.Pool,
-	rw http.ResponseWriter,
-	r *http.Request,
-	ind_num_taxp int,
-	name_of_company,
-	address_name,
-	email,
-	hashedPassword,
-
-	Data,
-	file_path string) (err error) {
-
+func (repo *MyRepository) SigLegalUserEmailSQL(ctx context.Context, rep *pgxpool.Pool, rw http.ResponseWriter, r *http.Request, ind_num_taxp int, name_of_company, address_name, email, hashedPassword, Data, file_path string) (err error) {
 	type Response struct {
-		Status  string
-		Data    int
-		Message string
+		Status  string `json:"status"`
+		Data    int    `json:"data"`
+		Message string `json:"message"`
 	}
 	result, errors := rep.Query(ctx, `
 			WITH i AS (
@@ -276,6 +263,7 @@ func (repo *MyRepository) SigLegalUserEmailSQL(
 			SELECT i.id, $5, $6, $7 FROM i
 			RETURNING user_id;
 		`,
+
 		1,
 		hashedPassword,
 		email,
@@ -309,17 +297,6 @@ func (repo *MyRepository) SigLegalUserEmailSQL(
 		})
 
 		return
-	} else if errors != nil {
-		_, err = DeleteImage(rw, file_path)
-		errorr(err)
-
-		rw.WriteHeader(http.StatusOK)
-		json.NewEncoder(rw).Encode(Response{
-			Status:  "fatal",
-			Message: errors.Error(),
-		})
-
-		return
 	} else {
 		response := Response{
 			Status:  "success",
@@ -334,23 +311,11 @@ func (repo *MyRepository) SigLegalUserEmailSQL(
 	}
 }
 
-func (repo *MyRepository) SigLegalUserPhoneSQL(
-	ctx context.Context,
-	rep *pgxpool.Pool,
-	rw http.ResponseWriter,
-	r *http.Request,
-	ind_num_taxp int,
-	name_of_company,
-	address_name,
-	phone_number,
-	hashedPassword,
-
-	Data,
-	file_path string) (err error) {
+func (repo *MyRepository) SigLegalUserPhoneSQL(ctx context.Context, rep *pgxpool.Pool, rw http.ResponseWriter, r *http.Request, ind_num_taxp int, name_of_company, address_name, phone_number, hashedPassword, Data, file_path string) (err error) {
 	type Response struct {
-		Status  string
-		Data    int
-		Message string
+		Status  string `json:"status"`
+		Data    int    `json:"data"`
+		Message string `json:"message"`
 	}
 	result, errors := rep.Query(ctx, `
 			WITH i AS (
@@ -411,6 +376,7 @@ func (repo *MyRepository) SigLegalUserPhoneSQL(
 		// 	return
 		// } else {
 	}
+
 	response := Response{
 		Status:  "success",
 		Data:    User_id,
@@ -784,7 +750,7 @@ func (repo *MyRepository) LoginSQL(ctx context.Context, rep *pgxpool.Pool, rw ht
 	row := rep.QueryRow(ctx,
 		`
 		SELECT users.id,
-			users.email,
+			COALESCE(users.email, 'Нет email'),
 			COALESCE(individual_user.Name::TEXT, company_user.Name_of_company::TEXT) AS Name,
 			COALESCE(individual_user.Surname::TEXT, company_user.Ind_num_taxp::TEXT) AS Surname_or_Ind_num,
 			COALESCE(individual_user.Patronymic::TEXT, company_user.Address_name::TEXT) AS Patronomic_or_Addres_name,
@@ -2237,7 +2203,21 @@ func (repo *MyRepository) RecoveryPasswdEmailSQL(ctx context.Context, rw http.Re
 	// Сообщение
 	subject := "Subject: Тебя беспокоит служба безопасности сбербанка.\n"
 	body := "Введи этот код.\n"
-	codeNum := 777 // Здесь лучше использовать случайный код
+	// Генерация случайного кода
+	// Диапазон четырёхзначных чисел: от 1000 до 9999
+	min, max := 1000, 9999
+	// Вычисляем размер диапазона
+	rangeSize := big.NewInt(int64(max - min + 1))
+	// Генерируем случайное число в диапазоне от 0 до rangeSize-1
+	n, err := rand.Int(rand.Reader, rangeSize)
+	if err != nil {
+		// logger.Err(err).Msg(fmt.Sprintf("error in %s", op+"; Ошибка генерации случайного числа"))
+
+		return
+	}
+	// Смещаем результат, чтобы получить число в диапазоне от min до max
+	codeNum := int(n.Int64() + int64(min)) // искомое число
+
 	message := []byte(subject + "\n" + body + strconv.Itoa(codeNum))
 
 	// Авторизация для отправки email
@@ -2311,17 +2291,15 @@ func (repo *MyRepository) RecoveryPasswdEmailSQL(ctx context.Context, rw http.Re
 		SameSite: http.SameSiteLaxMode,
 	}
 
-	fmt.Printf("Кука установлена: %v\n", cookie)
-
-	CodeNum := 777 // Здесь лучше использовать случайный код
+	_ = cookie
 
 	type Kesh struct {
-		CodeNum    int
-		Email_name string
+		CodeNum string
+		Login   string
 	}
 
 	// Преобразуем структуру kesh в JSON
-	keshData, err := json.Marshal(Kesh{CodeNum: CodeNum, Email_name: email})
+	keshData, err := json.Marshal(Kesh{CodeNum: strconv.Itoa(codeNum), Login: email})
 	errorr(err)
 
 	// Сохраняем код подтверждения в Redis с TTL 10 минут
@@ -2386,8 +2364,8 @@ func (h *SignupHandler) RecoveryPasswdPhoneSQL(ctx context.Context, rw http.Resp
 	}
 
 	type Kesh struct {
-		Phone_num string
-		Code      int
+		CodeNum string
+		Login   string
 	}
 
 	// Генерация случайного кода
@@ -2406,7 +2384,7 @@ func (h *SignupHandler) RecoveryPasswdPhoneSQL(ctx context.Context, rw http.Resp
 	h.CodeNum = int(n.Int64() + int64(min)) // искомое число
 
 	// Преобразуем структуру kesh в JSON
-	keshData, err := json.Marshal(Kesh{Phone_num: phone_num, Code: h.CodeNum})
+	keshData, err := json.Marshal(Kesh{CodeNum: strconv.Itoa(h.CodeNum), Login: phone_num})
 	if err != nil {
 		// logger.Err(err).Msg(" error in internal.services.user.SignupUserByPhone; ошибка с структурой json или преобразованием типа")
 
@@ -2496,6 +2474,57 @@ func (h *SignupHandler) RecoveryPasswdPhoneSQL(ctx context.Context, rw http.Resp
 	json.NewEncoder(rw).Encode(response)
 
 	return
+}
+
+func (repo *MyRepository) RecoveryPasswdCodeSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, redisClient *redis.Client, passwd string, code string, login string) (err error) {
+	request, err := rep.Query(
+		ctx,
+		`UPDATE users.users SET password_hash = $1 WHERE email = $2 OR phone_number = $2 RETURNING id;`,
+		passwd,
+		login)
+
+	errorr(err)
+
+	var id int
+
+	for request.Next() {
+		err := request.Scan(
+			&id,
+		)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+	}
+
+	type Response struct {
+		Status  string `json:"status"`
+		Data    int    `json:"data,omitempty"`
+		Message string `json:"message"`
+	}
+
+	if err != nil || id != 0 {
+		response := Response{
+			Status:  "success",
+			Data:    id,
+			Message: "Показано",
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(response)
+
+		return err
+	}
+
+	response := Response{
+		Status:  "fatal",
+		Message: "Не показано",
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	json.NewEncoder(rw).Encode(response)
+
+	return err
 }
 
 func (repo *MyRepository) SendCodeSQL(ctx context.Context, rw http.ResponseWriter, rep *pgxpool.Pool, r *http.Request, redisClient *redis.Client, token *http.Cookie, code int) (err error) {

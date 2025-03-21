@@ -752,9 +752,30 @@ func (h *SignupHandler) SignupLegalEmail(ctx context.Context, dbpool *pgxpool.Po
 			return
 		}
 
+		type Response struct {
+			Status  string `json:"status"`
+			Data    int    `json:"data"`
+			Message string `json:"message"`
+		}
+
+		if storedKesh.Email == "" || user.Ind_num_taxp == 0 || user.Name_of_company == "" || user.Address_name == "" {
+			response := Response{
+				Status:  "fatal",
+				Data:    0,
+				Message: "Передаёшь пустое значение",
+			}
+
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(response)
+
+			return
+		}
+
 		repo := database.NewRepo(ctx, dbpool)
 
 		var pwd = "/home/beeline/media/user/"
+
+		fmt.Println("Email: ", storedKesh.Email)
 
 		err, image_flag, file_path := function.UploadAvatar(w, user.Avatar, pwd, strings.Split(storedKesh.Email, ".")[0], "ava")
 		if err != nil {
@@ -764,20 +785,7 @@ func (h *SignupHandler) SignupLegalEmail(ctx context.Context, dbpool *pgxpool.Po
 		}
 
 		if image_flag {
-			err = repo.SigLegalUserEmailSQL(
-				ctx,
-				dbpool,
-				w,
-				r,
-				user.Ind_num_taxp,
-				user.Name_of_company,
-				user.Address_name,
-				storedKesh.Email,
-				user.Password_hash,
-
-				user.Data,
-				file_path,
-			)
+			err = repo.SigLegalUserEmailSQL(ctx, dbpool, w, r, user.Ind_num_taxp, user.Name_of_company, user.Address_name, storedKesh.Email, user.Password_hash, user.Data, file_path)
 		}
 
 		return
@@ -847,24 +855,8 @@ func (h *SignupHandler) SignupLegalPhone(ctx context.Context, dbpool *pgxpool.Po
 			return
 		}
 
-		// Попытка прочитать куку
-		token, err := r.Cookie("token")
-		if err != nil {
-			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при попытке прочитать куку")
-
-			return
-		}
-
-		token_flag, _, _ := jwt.IsAuthorized(token.Value)
-
-		if !token_flag {
-			h.Logger.Err(err).Msg(" error in " + op + "; JWT невалиден")
-
-			return
-		}
-
 		// Получаем данные из Redis
-		keshData, err := h.RedisClient.Get(ctx, token.Value).Result()
+		keshData, err := h.RedisClient.Get(ctx, h.JWT).Result()
 		if err == redis.Nil {
 			h.Logger.Err(err).Msg(" error in " + op + "; Код не найден или истек")
 
@@ -884,6 +876,25 @@ func (h *SignupHandler) SignupLegalPhone(ctx context.Context, dbpool *pgxpool.Po
 			return
 		}
 
+		type Response struct {
+			Status  string `json:"status"`
+			Data    int    `json:"data"`
+			Message string `json:"message"`
+		}
+
+		if storedKesh.Phone == "" || user.Ind_num_taxp == 0 || user.Name_of_company == "" || user.Address_name == "" {
+			response := Response{
+				Status:  "fatal",
+				Data:    0,
+				Message: "Передаёшь пустое значение",
+			}
+
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(response)
+
+			return
+		}
+
 		repo := database.NewRepo(ctx, dbpool)
 
 		var pwd = "/root/home/beeline_project/media/user/"
@@ -893,26 +904,56 @@ func (h *SignupHandler) SignupLegalPhone(ctx context.Context, dbpool *pgxpool.Po
 			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при добавлении аватара. Путь к файлу: " + file_path)
 		}
 		if image_flag {
-			err = repo.SigLegalUserPhoneSQL(
-				ctx,
-				dbpool,
-				w,
-				r,
-				user.Ind_num_taxp,
-				user.Name_of_company,
-				user.Address_name,
-				storedKesh.Phone,
-				user.Password_hash,
-
-				user.Data,
-				file_path,
-			)
+			err = repo.SigLegalUserPhoneSQL(ctx, dbpool, w, r, user.Ind_num_taxp, user.Name_of_company, user.Address_name, storedKesh.Phone, user.Password_hash, user.Data, file_path)
 		}
 		return
 	}
 }
 
-func SignupNaturEmail(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+func SignupNaturEmailCreater(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		op := "internal.services.user.EnterCodeFromEmailCreater"
+
+		// Попытка прочитать куку
+		token, err := r.Cookie("token")
+		if err != nil {
+			if err == http.ErrNoCookie {
+				logger.Err(err).Msg(" error in " + op + "; Кука не найдена")
+
+				return
+			}
+
+			logger.Err(err).Msg(" error in " + op + "; Проблема с чтением куки")
+
+			return
+		}
+
+		if token.Value == "" {
+			logger.Err(err).Msg(" error in " + op + "; Токен пуст")
+
+			return
+		}
+
+		token_flag, _, _ := jwt.IsAuthorized(token.Value)
+		if !token_flag {
+			logger.Err(err).Msg(" error in " + op + "; Неверный токен")
+
+			return
+		}
+
+		handler := &SignupHandler{
+			RedisClient: redisClient,
+			Logger:      logger,
+			JWT:         token.Value,
+		}
+
+		// 4) Вызываем дальше нужную логику: например, метод EnterCodeFromEmail
+		subHandler := handler.SignupNaturEmail(ctx, dbpool)
+		subHandler(w, r, ps) // передаём управление вашему вторичному хендлеру
+	}
+}
+
+func (h *SignupHandler) SignupNaturEmail(ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		op := "internal.services.user.SignupNaturEmail"
 
@@ -921,7 +962,7 @@ func SignupNaturEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		// Парсинг JSON-запроса
 		err := json.NewDecoder(r.Body).Decode(&user)
 		if err != nil {
-			logger.Err(err).Msg(fmt.Sprintf("error in %v; Ошибка при парсинге JSON-запроса", op))
+			h.Logger.Err(err).Msg(fmt.Sprintf("error in %v; Ошибка при парсинге JSON-запроса", op))
 
 			return
 		}
@@ -932,30 +973,22 @@ func SignupNaturEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 			return
 		}
 
-		// Попытка прочитать куку
-		token, err := r.Cookie("token")
-		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при чтении куки файлов")
-
-			return
-		}
-
-		token_flag, _, _ := jwt.IsAuthorized(token.Value)
+		token_flag, _, _ := jwt.IsAuthorized(h.JWT)
 
 		if !token_flag {
-			logger.Err(err).Msg(" error in " + op + "; JWT не валиден")
+			h.Logger.Err(err).Msg(" error in " + op + "; JWT не валиден")
 
 			return
 		}
 
 		// Получаем данные из Redis
-		keshData, err := redisClient.Get(ctx, token.Value).Result()
+		keshData, err := h.RedisClient.Get(ctx, h.JWT).Result()
 		if err == redis.Nil {
-			logger.Err(err).Msg(" error in " + op + "; Код Redis не найден или истек")
+			h.Logger.Err(err).Msg(" error in " + op + "; Код Redis не найден или истек")
 
 			return
 		} else if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при получении данных из Redis")
 
 			return
 		}
@@ -964,7 +997,7 @@ func SignupNaturEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 		var storedKesh model.Email_kesh
 		err = json.Unmarshal([]byte(keshData), &storedKesh)
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при десериализации данных из Redis")
 
 			return
 		}
@@ -975,7 +1008,7 @@ func SignupNaturEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 
 		err, image_flag, file_path := function.UploadAvatar(w, user.Avatar, pwd, strings.Split(storedKesh.Email, ".")[0], "ava")
 		if err != nil {
-			logger.Err(err).Msg(" error in " + op + "; Ошибка при добавлении аватара. Путь до файла: " + file_path)
+			h.Logger.Err(err).Msg(" error in " + op + "; Ошибка при добавлении аватара. Путь до файла: " + file_path)
 
 			return
 		}
@@ -995,7 +1028,7 @@ func SignupNaturEmail(redisClient *redis.Client, logger zerolog.Logger, ctx cont
 				file_path)
 
 			if err != nil {
-				logger.Err(err).Msg(" error in " + op + "; Ошибка с аватаркой пользователя")
+				h.Logger.Err(err).Msg(" error in " + op + "; Ошибка с аватаркой пользователя")
 
 				return
 			}

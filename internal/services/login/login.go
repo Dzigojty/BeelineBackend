@@ -841,6 +841,87 @@ func RecoveryPasswdPhone(redisClient *redis.Client, logger zerolog.Logger, ctx c
 	}
 }
 
+func RecoveryPasswdCode(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		op := "internal.services.login.RecoveryPassWithEmail"
+
+		type Passwd struct { // используется в SendCodeForRecoveryPassWithEmailPOST, EnterPasswdPOST
+			Code     string `json:"Code"`
+			Passwd_1 string `json:"Passwd_1"`
+			Passwd_2 string `json:"Passwd_2"`
+		}
+
+		var passwd Passwd
+
+		// Парсинг JSON-запроса
+		err := json.NewDecoder(r.Body).Decode(&passwd)
+		if err != nil {
+			logger.Err(err).Msg(" error in " + op + "; Ошибка при парсинге JSON-запроса")
+
+			return
+		}
+
+		repo := database.NewRepo(ctx, dbpool)
+
+		token, err := r.Cookie("token")
+
+		token_flag, _, _ := jwt.IsAuthorized(token.Value)
+
+		if !token_flag {
+			response := model.Response{
+				Status:  "fatal",
+				Message: "Что-то не так с JWT",
+			}
+
+			json.NewEncoder(w).Encode(response)
+
+			return
+		}
+
+		keshData, err := redisClient.Get(ctx, token.Value).Result()
+		if err == redis.Nil {
+			log.Println("Ключ не найден")
+			http.Error(w, "Код не найден или истек", http.StatusUnauthorized)
+			return
+		} else if err != nil {
+			log.Fatal("Ошибка при получении данных из Redis:", err)
+			http.Error(w, "Ошибка сервера", http.StatusInternalServerError)
+			return
+		}
+
+		type Data struct {
+			CodeNum string `json:"CodeNum"`
+			Login   string `json:"Login"`
+		}
+		var date Data
+		err = json.Unmarshal([]byte(keshData), &date)
+		if err != nil {
+			fmt.Println("Ошибка парсинга:", err)
+			return
+		}
+
+		// Проверяем код
+		if passwd.Passwd_1 == passwd.Passwd_2 && date.CodeNum == passwd.Code {
+			flag := function.ValidatePassword(w, passwd.Passwd_1)
+
+			if !flag {
+				logger.Err(err).Msg(" error in " + op + "; пароль не валиден")
+
+				return
+			}
+
+			err = repo.RecoveryPasswdCodeSQL(ctx, w, dbpool, redisClient, passwd.Passwd_1, date.CodeNum, date.Login)
+			if err != nil {
+				logger.Err(err).Msg(fmt.Sprintf("error in %s; ошибка с процедурой RecoveryPassWithPhoneNumSQL", op))
+			}
+
+			w.Write([]byte("Смена завершена успешно"))
+		} else {
+			http.Error(w, "Неверный код подтверждения", http.StatusUnauthorized)
+		}
+	}
+}
+
 func SendCode(redisClient *redis.Client, logger zerolog.Logger, ctx context.Context, dbpool *pgxpool.Pool) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		op := "internal.services.login.SendCode"
